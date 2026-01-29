@@ -1,0 +1,69 @@
+# Python 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 日志文件
+logs/
+*.log
+strategies/logs/
+# 新增：忽略 strategies/log/ 文件夹（注意路径拼写，如果你实际是 log 单数也可对应修改）
+
+# 结果文件（回测、进化、实验结果）
+backtest_results/
+evolution_results/
+quant_lab_results/
+data_pipeline/
+
+
+deploy/
+dist_backup/
+
+# 缓存/临时文件
+.DS_Store
+.env
+.venv
+venv/
+*.swp
+*.swo
+*~
+
+# 配置文件（如果包含敏感信息）
+#config/config.yaml
+
+# Web UI 报告（可选忽略）
+web_ui/reports/
+
+# 旧文件备份
+strategies/old/
+
+# 静态资源（如果不需要版本控制）
+# static/assets/
+
+# 字节码/缓存
+*.pyc
+
+
+# Jupyter Notebook 检查点文件
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+*.ipynb_checkpoint
+
