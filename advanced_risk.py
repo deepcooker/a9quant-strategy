@@ -55,6 +55,8 @@ class RiskManager:
         # [新增] 加载持久化状态 (锚定本金)
         self.anchor_capital = self.initial_capital
         self._load_state()
+        #v1.0
+        self.account_state = account_state # 新增：持有AccountState实例
 
 
     def _load_state(self):
@@ -192,6 +194,30 @@ class RiskManager:
     # 新增：趋势预算获取方法（生产级必备）
     def get_trend_budget(self):
         return max(0.0, self.initial_capital * self.trend_allocation + self.realized_profit * 0.7)
+    
+    
+    # v1.0修改原有的 update_snapshot 方法
+    def update_from_account_state(self):
+        """
+        从AccountState自动更新风控快照。
+        这是连接数据层和风控层的核心方法。
+        """
+        if not self.account_state:
+            logger.warning("⚠️ AccountState未注入，风控无法更新。")
+            return
+
+        # 1. 从数据底座获取权威快照
+        risk_snap = self.account_state.get_risk_snapshot()
+        
+        # 2. 调用原有的内部更新逻辑
+        # 注意：这里将快照数据映射到原方法的参数上
+        self.update_snapshot(
+            wallet_balance=risk_snap['wallet_balance'],
+            trend_float=risk_snap['trend_float'],
+            shark_float=risk_snap['shark_float'],
+            margin_usage=risk_snap['margin_usage']
+        )
+        logger.debug(f"🔄 风控状态已通过AccountState更新。")
 
 # ==========================================
 # 3. 修复后的博弈测试类 (Test Data Isolation)

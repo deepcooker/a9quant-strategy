@@ -1,0 +1,16 @@
+{
+  "exchange": {
+    "exchange_id": "bitget",
+    "api_key": "bg_43cbd60d1aa3b5edfbbc176c7f15a029",
+    "secret": "443ea49362654b1c75d20e64306005a7c4fe975a6dea90f053bbc8dff8fe9959",
+    "passphrase": "17717677953",
+    "sandbox": true,
+    "default_trade_type": "swap"
+  },
+  "symbol": "BTC/USDT:USDT",
+  "risk": {
+    "initial_capital": 200,
+    "state_file": "risk_state.json"
+  }
+}
+

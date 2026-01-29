@@ -2,7 +2,8 @@
 import logging
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from .data_synchronizer import DataSynchronizer
+from data_synchronizer import DataSynchronizer
+import time  # 补充time模块导入
 
 logger = logging.getLogger('AccountState')
 

@@ -3,7 +3,7 @@ import logging
 import time
 import os
 from enum import Enum
-from .advanced_risk import RiskManager
+from advanced_risk import RiskManager
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format="%(message)s")
