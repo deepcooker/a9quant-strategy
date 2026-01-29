@@ -30,7 +30,7 @@ class RiskManager:
     6. [新增] 状态持久化: 保存锚定本金，实现水位线重置逻辑
     7. [新增] 阶梯式水位: 三级账户模型（锚定本金/净值余额/有效资金），避免风控抖动
     """
-    def __init__(self, initial_capital=200, state_file='/root/policy/busi/strategy/risk_state.json'):
+    def __init__(self, initial_capital=200, state_file='/root/policy/busi/strategy/risk_state.json', account_state=None):
         self.initial_capital = initial_capital # 默认初始本金，会被持久化文件覆盖
         self.state_file = state_file
         
