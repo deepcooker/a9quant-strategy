@@ -1,0 +1,82 @@
+{
+  "exchange_id": "bitget",
+  "symbol": "BTC/USDT:USDT",
+  "leverage": 10,
+  "position_mode": "dual",
+  "margin_mode": "crossed",
+  "margin_coin": "USDT",
+  "is_taker": false,
+  "sandbox": true,
+
+  "basic_trading_settings": {
+    "long_short_direction": 3
+  },
+
+  "order_parameters": {
+    "initial_usdt_amount": 20.0,
+    "max_usdt_amount": 1000.0,
+    "add_multiplier": 1.7
+  },
+
+  "adding_rules": {
+    "enable_trend_add": true,
+
+    "opposite_add_spread": 1500.0,
+    "opposite_spread_decrement": 150.0,
+    "opposite_spread_min": 800.0,
+
+    "trend_add_spread": 120.0,
+    "trend_spread_decrement": 20.0,
+    "trend_spread_min": 40.0,
+
+    "shark_special_rules": {
+      "enable_shark_mode": true,
+      "trend_stop_opposite_add": true,
+      "min_callback_for_opposite": 800.0,
+      "opposite_hold_after_trend_tp": true
+    }
+  },
+
+  "profit_stop_loss_settings": {
+    "opposite_profit_ticks": 2500.0,
+    "opposite_profit_decrement": 200.0,
+    "opposite_profit_min": 1000.0,
+
+    "trend_profit_ticks": 1200.0,
+
+    "global_trailing_stop_ticks": 600.0
+  },
+
+  "close_rules": {
+    "total_loss_close": 6000.0,
+    "stop_trading_after_loss_close": false,
+    "total_loss_percent": 30.0
+  },
+
+  "risk_control": {
+    "max_consecutive_loss": 5,
+    "daily_max_drawdown": "15.0",
+    "max_position_count": 8,
+    "single_position_max_risk": "2.0",
+    "single_symbol_max_position": 4,
+    "total_exposure_max_ratio": "800.0",
+    "cool_down_seconds": 300
+  },
+
+  "contract_base": {
+    "dynamic_tick_size": true,
+    "manual_tick_size": 0.1,
+    "points_to_tick": 100.0
+  },
+
+  "api": {
+    "apiKey": "bg_43cbd60d1aa3b5edfbbc176c7f15a029",
+    "secret": "443ea49362654b1c75d20e64306005a7c4fe975a6dea90f053bbc8dff8fe9959",
+    "password": "17717677953"
+  },
+
+  "system_settings": {
+    "order_cooldown_seconds": 3.0,
+    "config_reload_interval": 5.0
+  }
+}
