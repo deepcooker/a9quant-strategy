@@ -25,6 +25,7 @@ class TradeIntent:
     client_oid: Optional[str] = None
     approved_leverage: Optional[float] = None
     trace_id: Optional[str] = None
+    decision_id: Optional[str] = None
 
 
 @dataclass

@@ -4,7 +4,7 @@ import time
 from contracts import MarketData, StrategyContext, StrategySnapshot
 from advanced_risk import RiskManager
 from trend_engine import TrendEngine
-from tiny_oms import TinyOMS
+from tiny_oms import TinyOMS, OrderStatus
 
 
 class DummyTrader:
@@ -62,7 +62,7 @@ async def main():
     steps.append("oms")
     order = oms.orders.get(client_oid)
     assert order is not None, "OMS 未记录订单"
-    assert order.status == "DRY_RUN", f"OMS 状态异常: {order.status}"
+    assert order.status == OrderStatus.FILLED, f"OMS 状态异常: {order.status}"
     assert steps == ["intent", "approved", "oms"]
     assert order.trace_id == trace_id
     print(f"✅ Dry-run 下单完成: {client_oid}")

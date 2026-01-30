@@ -199,3 +199,16 @@ def test_state_is_updated_only_via_synchronizer():
 
     account_state.update()
     assert "long" in account_state.positions
+
+
+def test_oms_idempotency_prevents_duplicate_orders():
+    exchange = DummyExchange()
+    intent = build_intent()
+    intent.decision_id = "decision-1"
+
+    oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=True)
+    first = asyncio.run(oms.place_intent(intent))
+    second = asyncio.run(oms.place_intent(intent))
+
+    assert first == second
+    assert len(oms.orders) == 1
