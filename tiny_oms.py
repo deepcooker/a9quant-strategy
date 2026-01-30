@@ -3,11 +3,24 @@ import time
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
+
+from contracts import TradeIntent
 
 from contracts import TradeIntent
 
 logger = logging.getLogger("TinyOMS")
+
+def resolve_trade_mode(live_trading_config: bool, env_allow: Optional[str]) -> Tuple[bool, str]:
+    """Determine dry-run mode and provide a human-readable reason."""
+    env_enabled = str(env_allow).lower() == "true"
+    if live_trading_config and env_enabled:
+        return False, "live_trading=true and ALLOW_LIVE_TRADING=true"
+    if not live_trading_config and not env_enabled:
+        return True, "live_trading=false and ALLOW_LIVE_TRADING!=true"
+    if not live_trading_config:
+        return True, "live_trading=false"
+    return True, "ALLOW_LIVE_TRADING!=true"
 
 @dataclass
 class OrderRecord:

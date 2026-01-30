@@ -2,6 +2,7 @@
 import asyncio
 import time
 import logging
+import os
 
 from contracts import StrategyContext
 from data_synchronizer import DataSynchronizer
@@ -12,7 +13,7 @@ from trend_engine import TrendEngine
 from shark_engine import SharkEngine
 
 from market_data_hub import MarketDataHub
-from tiny_oms import TinyOMS
+from tiny_oms import TinyOMS, resolve_trade_mode
 from bitget_ws_bridge import BitgetWSBridge
 
 logger = logging.getLogger('MainCtrl')
@@ -28,7 +29,11 @@ class MainController:
         self.trader = ExchangeTrader(**config['exchange'])
         self.data_sync = DataSynchronizer(self.trader, config['symbol'])
         self.account_state = AccountState(self.data_sync)
-        self.dry_run = bool(config.get("dry_run", True))
+        live_trading = bool(config.get("live_trading", False))
+        self.dry_run, mode_reason = resolve_trade_mode(
+            live_trading_config=live_trading,
+            env_allow=os.getenv("ALLOW_LIVE_TRADING"),
+        )
 
         self.risk_manager = RiskManager(
             initial_capital=config['risk']['initial_capital'],
@@ -45,7 +50,9 @@ class MainController:
             dry_run=self.dry_run,
         )  # v1.3
         if self.dry_run:
-            logger.info("🧪 Dry-run 模式启用：OMS 将模拟下单，不接入真实交易所。")
+            logger.info(f"🧪 DRY_RUN 模式启用：OMS 将模拟下单，不接入真实交易所。原因: {mode_reason}")
+        else:
+            logger.info(f"🚨 LIVE 模式启用：允许真实下单。原因: {mode_reason}")
 
         self.ws = BitgetWSBridge(
             api_key=config["exchange"]["api_key"],

@@ -2,8 +2,12 @@
 import asyncio
 import json
 
+import os
+
+
 from contracts import RiskRequest, StrategySnapshot, TradeIntent
 from advanced_risk import RiskManager
+from tiny_oms import TinyOMS, resolve_trade_mode
 
 
 def test_risk_reject_reason():
@@ -57,3 +61,65 @@ async def manual_integration_check():
 
 if __name__ == "__main__":
     asyncio.run(manual_integration_check())
+
+
+class DummyExchange:
+    def __init__(self):
+        self.called = False
+
+    def private_mix_post_v2_mix_order_place_order(self, req):
+        self.called = True
+        return {"code": "00000", "data": {"orderId": "test"}}
+
+
+class DummyTrader:
+    exchange_id = "bitget"
+
+    def __init__(self, exchange):
+        self.exchange = exchange
+
+
+def build_intent():
+    risk_request = RiskRequest(
+        engine="SHARK",
+        action="OPEN_L1",
+        suggested_leverage=2,
+        volatility_ratio=1.0,
+        estimated_risk=1.0,
+    )
+    return TradeIntent(
+        engine="SHARK",
+        action="OPEN_L1",
+        trade_side="open",
+        pos_side="short",
+        size=0.01,
+        margin_mode="crossed",
+        risk_request=risk_request,
+    )
+
+
+def test_live_gate_requires_env_and_config(monkeypatch):
+    exchange = DummyExchange()
+    intent = build_intent()
+
+    # config true, env missing -> dry-run
+    monkeypatch.delenv("ALLOW_LIVE_TRADING", raising=False)
+    dry_run, _ = resolve_trade_mode(live_trading_config=True, env_allow=os.getenv("ALLOW_LIVE_TRADING"))
+    oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=dry_run)
+    asyncio.run(oms.place_intent(intent))
+    assert exchange.called is False
+
+    # env true, config false -> dry-run
+    exchange.called = False
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "true")
+    dry_run, _ = resolve_trade_mode(live_trading_config=False, env_allow=os.getenv("ALLOW_LIVE_TRADING"))
+    oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=dry_run)
+    asyncio.run(oms.place_intent(intent))
+    assert exchange.called is False
+
+    # both true -> live
+    exchange.called = False
+    dry_run, _ = resolve_trade_mode(live_trading_config=True, env_allow=os.getenv("ALLOW_LIVE_TRADING"))
+    oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=dry_run)
+    asyncio.run(oms.place_intent(intent))
+    assert exchange.called is True

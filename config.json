@@ -10,6 +10,7 @@
   },
   "symbol": "BTC/USDT:USDT",
   "dry_run": true,
+  "live_trading": false,
   "risk": {
     "initial_capital": 200,
     "state_file": "risk_state.json"
