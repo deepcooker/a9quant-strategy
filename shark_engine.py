@@ -3,6 +3,8 @@ import logging
 import time
 import os
 from enum import Enum
+
+from contracts import StrategyContext, TradeIntent, RiskRequest, MarketData, StrategySnapshot
 from advanced_risk import RiskManager
 
 # 配置日志
@@ -19,7 +21,7 @@ class SharkState(Enum):
     L3_SNIPE = 3
 
 class SharkEngine:
-    def __init__(self, risk_manager):
+    def __init__(self, risk_manager: RiskManager):
         self.rm = risk_manager
         self.state = SharkState.SLEEP
         
@@ -92,7 +94,7 @@ class SharkEngine:
         self.state = new_state
         logger.info(f"🦈 [Action] 状态->{new_state.name} | 均价:{self.avg_price:.2f} | 规模:{self.total_size:.1f} | 占用保证金:{self.margin_used:.2f}U")
 
-    def _close_position(self, price, reason):
+    def _close_position(self, price, reason) -> TradeIntent:
         # v1.0 改造：返回平仓intent，不再内部执行平仓逻辑
         logger.info(f"🏁 [Shark平仓意图] {reason} | 价格:{price:.2f} | 均价:{self.avg_price:.2f}")
         
@@ -114,26 +116,27 @@ class SharkEngine:
         self.avg_price = 0
         
         # v1.0 返回平仓intent（做空平仓，pos_side=short）
-        return {
-            "engine": "SHARK",
-            "action": "CLOSE",
-            "trade_side": "close",
-            "pos_side": "short",  # 鲨鱼是做空逻辑
-            "size": 0.001,  # MVP：先写死最小值，后续从account_snapshot取真实持仓
-            "marginMode": "crossed",
-            "risk_request": {
-                "engine": "SHARK",
-                "action": "CLOSE",
-                "suggested_leverage": 1,
-                "volatility_ratio": 1.0,
-                "estimated_risk": 0.0
-            }
-        }
+        return TradeIntent(
+            engine="SHARK",
+            action="CLOSE",
+            trade_side="close",
+            pos_side="short",
+            size=0.001,
+            margin_mode="crossed",
+            risk_request=RiskRequest(
+                engine="SHARK",
+                action="CLOSE",
+                suggested_leverage=1,
+                volatility_ratio=1.0,
+                estimated_risk=0.0,
+            ),
+        )
 
-    def on_tick(self, data):
-        price = data['price']
-        ts = data.get('timestamp', time.time())
-        vol = data.get('vol_ratio', 1.0)
+    def on_tick(self, context: StrategyContext) -> TradeIntent | None:
+        data = context.market_data
+        price = data.price
+        ts = data.ts or time.time()
+        vol = data.vol_ratio if data.vol_ratio is not None else 1.0
         
         # 1. 汇报浮亏 (防止保险费超标)
         floating_pnl = self._calc_pnl(price)
@@ -141,7 +144,7 @@ class SharkEngine:
         
         # 2. 状态机 - v1.0 改造：调用函数接收intent并返回
         if self.state == SharkState.SLEEP:
-            if data['rsi'] > 70: 
+            if data.rsi is not None and data.rsi > 70:
                 intent = self._try_enter_l1(price, ts, vol)  # v1.0
                 if intent: return intent  # v1.0
                 
@@ -158,7 +161,7 @@ class SharkEngine:
         elif self.state == SharkState.L2_HUNT:
             self.l1_l2_max_loss = max(self.l1_l2_max_loss, abs(floating_pnl))
             # 极端信号 (L3)
-            if data['rsi'] > 85:
+            if data.rsi is not None and data.rsi > 85:
                 intent = self._try_enter_l3(price, vol)  # v1.0
                 if intent: return intent  # v1.0
 
@@ -171,29 +174,35 @@ class SharkEngine:
                 intent = self._close_position(price, "🛡️ [L3止损] 狙击失败")  # v1.0
                 if intent: return intent  # v1.0
 
-    def _try_enter_l1(self, price, ts, vol):
+    def _try_enter_l1(self, price, ts, vol) -> TradeIntent:
         # v1.0 改造：不再执行交易，返回开仓intent（做空，pos_side=short）
         budget = self.rm.get_shark_budget() * 0.1
-        req = {'engine': 'SHARK', 'action': 'OPEN_L1', 'suggested_leverage': 2, 'volatility_ratio': vol, 'estimated_risk': budget}
+        req = RiskRequest(
+            engine="SHARK",
+            action="OPEN_L1",
+            suggested_leverage=2,
+            volatility_ratio=vol,
+            estimated_risk=budget,
+        )
 
         # 近似计算size：(保证金*杠杆)/价格
-        size = (budget * req["suggested_leverage"]) / max(1e-9, price)
+        size = (budget * req.suggested_leverage) / max(1e-9, price)
 
         # v1.0 记录入场时间（乐观记录，后续需确认成交）
         self.entry_time = ts
         self.l1_l2_max_loss = 0
         
-        return {
-            "engine": "SHARK",
-            "action": "OPEN_L1",
-            "trade_side": "open",
-            "pos_side": "short",  # 鲨鱼是做空逻辑
-            "size": size,
-            "marginMode": "crossed",
-            "risk_request": req
-        }
+        return TradeIntent(
+            engine="SHARK",
+            action="OPEN_L1",
+            trade_side="open",
+            pos_side="short",
+            size=size,
+            margin_mode="crossed",
+            risk_request=req,
+        )
 
-    def _try_enter_l2(self, price, vol):
+    def _try_enter_l2(self, price, vol) -> TradeIntent | None:
         """
         v1.0 改造：返回加仓intent，保留保证金校验逻辑
         """
@@ -204,42 +213,54 @@ class SharkEngine:
             return None  # 无intent返回
         
         budget = self.rm.get_shark_budget() * 0.2
-        req = {'engine': 'SHARK', 'action': 'ADD_L2', 'suggested_leverage': 3, 'volatility_ratio': vol, 'estimated_risk': budget}
+        req = RiskRequest(
+            engine="SHARK",
+            action="ADD_L2",
+            suggested_leverage=3,
+            volatility_ratio=vol,
+            estimated_risk=budget,
+        )
 
         # 近似计算size
-        size = (budget * req["suggested_leverage"]) / max(1e-9, price)
+        size = (budget * req.suggested_leverage) / max(1e-9, price)
 
-        return {
-            "engine": "SHARK",
-            "action": "ADD_L2",
-            "trade_side": "open",
-            "pos_side": "short",
-            "size": size,
-            "marginMode": "crossed",
-            "risk_request": req
-        }
+        return TradeIntent(
+            engine="SHARK",
+            action="ADD_L2",
+            trade_side="open",
+            pos_side="short",
+            size=size,
+            margin_mode="crossed",
+            risk_request=req,
+        )
 
-    def _try_enter_l3(self, price, vol):
+    def _try_enter_l3(self, price, vol) -> TradeIntent | None:
         # v1.0 改造：返回L3加仓intent
         trend_profit = self.rm.realized_profit
         if trend_profit <= 0: return None
         
         # 梭哈逻辑：拿50%的趋势利润来赌
         risk_budget = trend_profit * 0.5
-        req = {'engine': 'SHARK', 'action': 'ADD_L3', 'suggested_leverage': 10, 'volatility_ratio': vol, 'estimated_risk': risk_budget}
+        req = RiskRequest(
+            engine="SHARK",
+            action="ADD_L3",
+            suggested_leverage=10,
+            volatility_ratio=vol,
+            estimated_risk=risk_budget,
+        )
 
         # 近似计算size
-        size = (risk_budget * req["suggested_leverage"]) / max(1e-9, price)
+        size = (risk_budget * req.suggested_leverage) / max(1e-9, price)
 
-        return {
-            "engine": "SHARK",
-            "action": "ADD_L3",
-            "trade_side": "open",
-            "pos_side": "short",
-            "size": size,
-            "marginMode": "crossed",
-            "risk_request": req
-        }
+        return TradeIntent(
+            engine="SHARK",
+            action="ADD_L3",
+            trade_side="open",
+            pos_side="short",
+            size=size,
+            margin_mode="crossed",
+            risk_request=req,
+        )
 
 # ==========================================
 # 4. 集成对抗测试 (Integrated Tests)
@@ -248,6 +269,26 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("🦈 SHARK & TREND 集成博弈测试（含极端场景补充）")
     print("="*60)
+
+    def build_context(price: float, rsi: float, vol_ratio: float) -> StrategyContext:
+        return StrategyContext(
+            market_data=MarketData(
+                price=price,
+                ema20=None,
+                atr=None,
+                rsi=rsi,
+                vol_ratio=vol_ratio,
+                ts=time.time(),
+            ),
+            account_snapshot=StrategySnapshot(
+                account=None,
+                positions={},
+                position_uncertain=False,
+            ),
+            system_mode="NORMAL",
+            risk_regime="NORMAL",
+            state_confidence=None,
+        )
     
     # 通用清理函数
     def clean_state_files(*files):
@@ -266,7 +307,7 @@ if __name__ == "__main__":
     shark.state = SharkState.L2_HUNT
     shark.total_size = 50
     # 尝试触发 L3 (无实盈)
-    intent = shark.on_tick({'price': 110, 'rsi': 90, 'vol_ratio': 1.0})  # v1.0 接收intent
+    intent = shark.on_tick(build_context(price=110, rsi=90, vol_ratio=1.0))  # v1.0 接收intent
     
     if shark.state == SharkState.L2_HUNT and intent is None:
         print("✅ PASS: L3 被正确拦截 (无趋势利润，符合风控规则)")
@@ -290,17 +331,17 @@ if __name__ == "__main__":
     print(f"    [Before] 均价: 100.00 | 规模: 100.0 | 状态: L2_HUNT")
     
     # 1. 触发 L3 (价格拉高到 110，极端RSI信号)
-    intent_l3 = shark2.on_tick({'price': 110, 'rsi': 90, 'vol_ratio': 1.0})  # v1.0 接收intent
+    intent_l3 = shark2.on_tick(build_context(price=110, rsi=90, vol_ratio=1.0))  # v1.0 接收intent
     
-    if intent_l3 and intent_l3["action"] == "ADD_L3" and shark2.state == SharkState.L2_HUNT:
-        print(f"    [L3启动] 意图返回成功 | Action: {intent_l3['action']} | Size: {intent_l3['size']:.2f}")
+    if intent_l3 and intent_l3.action == "ADD_L3" and shark2.state == SharkState.L2_HUNT:
+        print(f"    [L3启动] 意图返回成功 | Action: {intent_l3.action} | Size: {intent_l3.size:.2f}")
         target = shark2._calc_kill_target()
         print(f"    [Target] 目标回本价: {target:.2f}")
         
         # 2. 价格回归至 100 (原点，触发止盈)
-        intent_close = shark2.on_tick({'price': 100, 'rsi': 40, 'vol_ratio': 1.0})  # v1.0 接收平仓intent
+        intent_close = shark2.on_tick(build_context(price=100, rsi=40, vol_ratio=1.0))  # v1.0 接收平仓intent
         
-        if intent_close and intent_close["action"] == "CLOSE" and shark2.state == SharkState.SLEEP:
+        if intent_close and intent_close.action == "CLOSE" and shark2.state == SharkState.SLEEP:
             print(f"✅ PASS: 完美收网 | 平仓意图返回成功 | 最终盈利: {shark2.last_clean_pnl:.2f}U")
         else:
             print(f"❌ FAIL: 未返回平仓意图 | Intent: {intent_close} | PnL: {shark2.last_clean_pnl}")
@@ -335,14 +376,14 @@ if __name__ == "__main__":
     
     shark4.state = SharkState.SLEEP
     # 模拟波动率_ratio=2.0 (远大于1.5，触发杠杆降档)
-    tick_data = {'price': 100, 'rsi': 80, 'vol_ratio': 2.0}
+    tick_context = build_context(price=100, rsi=80, vol_ratio=2.0)
     
     # 捕获杠杆核准结果（通过返回的intent验证）
-    intent_l1 = shark4.on_tick(tick_data)  # v1.0 接收L1意图
+    intent_l1 = shark4.on_tick(tick_context)  # v1.0 接收L1意图
     
     # 优化验证逻辑：intent存在且action为OPEN_L1即算通过（杠杆在intent中定义）
-    if intent_l1 and intent_l1["action"] == "OPEN_L1" and intent_l1["risk_request"]["suggested_leverage"] <= 2:
-        print(f"✅ PASS: 波动率过高，杠杆成功降档 | 意图中杠杆: {intent_l1['risk_request']['suggested_leverage']}x (申请3x)")
+    if intent_l1 and intent_l1.action == "OPEN_L1" and intent_l1.risk_request.suggested_leverage <= 2:
+        print(f"✅ PASS: 波动率过高，杠杆成功降档 | 意图中杠杆: {intent_l1.risk_request.suggested_leverage}x (申请3x)")
     else:
         print(f"❌ FAIL: 杠杆未正确降档 | Intent: {intent_l1} | 状态: {shark4.state}")
     clean_state_files('risk_state_c4.json')
@@ -368,13 +409,8 @@ if __name__ == "__main__":
     current_price = 120  # 价格上涨20%，做空产生巨额浮亏
     # 关键：不手动写入RM浮亏，而是让SharkEngine和RM通过正常逻辑交互识别浮亏
     # 先执行一次tick，让RM更新当前浮亏状态
-    tick_data_init = {
-        'price': current_price,
-        'rsi': 85,
-        'vol_ratio': 1.0,
-        'timestamp': time.time()
-    }
-    shark5.on_tick(tick_data_init)
+    tick_context_init = build_context(price=current_price, rsi=85, vol_ratio=1.0)
+    shark5.on_tick(tick_context_init)
 
     # 4. 重新获取RM识别的实际浮亏（此时浮亏已远超预算）
     actual_floating_loss = rm5.shark_floating_loss
@@ -382,7 +418,7 @@ if __name__ == "__main__":
     print(f"    [前置信息] 趋势已实现利润: {rm5.realized_profit:.2f}U (满足L2加仓前提)")
 
     # 5. 再次执行tick，尝试触发L2加仓（此时浮亏超预算，应返回None）
-    intent_l2 = shark5.on_tick(tick_data_init)  # v1.0 接收L2意图
+    intent_l2 = shark5.on_tick(tick_context_init)  # v1.0 接收L2意图
 
     # 6. 优化验证逻辑：intent为None且状态保持L1_EXIST，即为拦截成功
     if shark5.state == SharkState.L1_EXIST and actual_floating_loss > shark_budget and intent_l2 is None:
@@ -398,17 +434,17 @@ if __name__ == "__main__":
     shark6 = SharkEngine(rm6)
     
     # 启动L1，设置入场时间为“25ticks前”（超过24ticks阈值）
-    shark6.on_tick({'price': 100, 'rsi': 80, 'vol_ratio': 1.0})
+    shark6.on_tick(build_context(price=100, rsi=80, vol_ratio=1.0))
     shark6.entry_time = time.time() - 25  # 模拟超时
     shark6.avg_price = 100
     shark6.total_size = 50
     # 模拟无盈利（价格不变，浮亏=0）
-    tick_data = {'price': 100, 'rsi': 75, 'vol_ratio': 1.0, 'timestamp': time.time()}
+    tick_context = build_context(price=100, rsi=75, vol_ratio=1.0)
     
-    intent_stop = shark6.on_tick(tick_data)  # v1.0 接收止损平仓意图
+    intent_stop = shark6.on_tick(tick_context)  # v1.0 接收止损平仓意图
     
     # 验证：返回平仓intent且状态回归SLEEP
-    if intent_stop and intent_stop["action"] == "CLOSE" and shark6.state == SharkState.SLEEP:
+    if intent_stop and intent_stop.action == "CLOSE" and shark6.state == SharkState.SLEEP:
         print("✅ PASS: 持仓超时无盈利，触发时间止损，返回平仓意图")
     else:
         print(f"❌ FAIL: 未触发时间止损 | Intent: {intent_stop} | 状态: {shark6.state} | 入场时间差: {time.time() - shark6.entry_time:.0f}ticks")
@@ -428,11 +464,11 @@ if __name__ == "__main__":
     shark7.leverage = 10
     
     # 模拟价格创新高（超过均价1%，触发L3止损）
-    tick_data = {'price': 101.5, 'rsi': 95, 'vol_ratio': 1.0}
-    intent_l3_stop = shark7.on_tick(tick_data)  # v1.0 接收L3止损意图
+    tick_context = build_context(price=101.5, rsi=95, vol_ratio=1.0)
+    intent_l3_stop = shark7.on_tick(tick_context)  # v1.0 接收L3止损意图
     
     # 验证：返回平仓intent且状态回归SLEEP
-    if intent_l3_stop and intent_l3_stop["action"] == "CLOSE" and shark7.state == SharkState.SLEEP:
+    if intent_l3_stop and intent_l3_stop.action == "CLOSE" and shark7.state == SharkState.SLEEP:
         print(f"✅ PASS: L3狙击失败，价格创新高触发止损 | 平仓意图返回成功 | 最终盈亏: {shark7.last_clean_pnl:.2f}U")
     else:
         print(f"❌ FAIL: L3未触发止损 | Intent: {intent_l3_stop} | 状态: {shark7.state} | 当前价格: 101.5 (均价: 100)")
@@ -448,7 +484,7 @@ if __name__ == "__main__":
     # 模拟趋势引擎L2持仓（占用部分保证金）
     shark8 = SharkEngine(rm8)
     # 先让鲨鱼L1开仓，占用部分保证金
-    shark8.on_tick({'price': 100, 'rsi': 80, 'vol_ratio': 1.0, 'timestamp': time.time()})
+    shark8.on_tick(build_context(price=100, rsi=80, vol_ratio=1.0))
     shark8.state = SharkState.L1_EXIST
     shark8.avg_price = 100
     shark8.total_size = 500  # 大幅加仓，占用大量保证金
@@ -462,13 +498,8 @@ if __name__ == "__main__":
     print(f"    [前置信息] 当前保证金使用率: {current_margin_usage:.2%} | 阈值: {MAX_MARGIN_USAGE_RATIO:.2%}")
 
     # 尝试让鲨鱼升级L2，触发保证金超标拦截（应返回None）
-    tick_data_margin = {
-        'price': 105,
-        'rsi': 85,
-        'vol_ratio': 1.0,
-        'timestamp': time.time()
-    }
-    intent_l2_margin = shark8.on_tick(tick_data_margin)  # v1.0 接收L2意图
+    tick_context_margin = build_context(price=105, rsi=85, vol_ratio=1.0)
+    intent_l2_margin = shark8.on_tick(tick_context_margin)  # v1.0 接收L2意图
 
     # 验证：intent为None且状态保持L1_EXIST，即为拦截成功
     if shark8.state == SharkState.L1_EXIST and intent_l2_margin is None:
