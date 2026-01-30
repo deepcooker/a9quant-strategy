@@ -100,6 +100,7 @@ class BaseBitgetWsClient:
 
                     sub_msg = {"op": "subscribe", "args": args}
                     await ws.send(json.dumps(sub_msg))
+                    await self.on_public_reconnect()
 
                     # 启动心跳
                     heartbeat_task = asyncio.create_task(self._keep_alive(ws))
@@ -143,6 +144,7 @@ class BaseBitgetWsClient:
             except Exception as e:
                 # v1.0: 使用 repr(e) 修复 TypeError: unsupported format string
                 logger.error(f"公共 WS 断开: {repr(e)}，3秒后重连...")
+                await self.on_public_disconnect()
                 await asyncio.sleep(3)
     
     # ------------------- 私有WS方法 (完整保留) -------------------
@@ -183,6 +185,7 @@ class BaseBitgetWsClient:
                     }
                     await ws.send(json.dumps(sub_msg))
                     logger.info("✅ 已订阅 Orders & Positions & Account")
+                    await self.on_private_reconnect()
 
                     heartbeat_task = asyncio.create_task(self._keep_alive(ws))
 
@@ -225,6 +228,7 @@ class BaseBitgetWsClient:
             except Exception as e:
                 # v1.0: 使用 repr(e) 修复 TypeError
                 logger.error(f"私有 WS 异常: {repr(e)}, 3秒后重连...")
+                await self.on_private_disconnect()
                 await asyncio.sleep(3)
     
     # ------------------- 钩子方法 -------------------
@@ -241,6 +245,18 @@ class BaseBitgetWsClient:
         pass
     
     async def on_private_account(self, account_data: dict):
+        pass
+
+    async def on_public_disconnect(self):
+        pass
+
+    async def on_private_disconnect(self):
+        pass
+
+    async def on_public_reconnect(self):
+        pass
+
+    async def on_private_reconnect(self):
         pass
     
     # ------------------- 签名方法 -------------------

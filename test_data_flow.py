@@ -77,7 +77,7 @@ async def main():
     risk_snapshot = acc_state.get_risk_snapshot()
     if risk_snapshot:
         print("   ✅ 风控快照生成成功，包含以下关键字段:")
-        for key, value in risk_snapshot.items():
+        for key, value in risk_snapshot.__dict__.items():
             if key != 'timestamp':
                 print(f"      - {key}: {value}")
     else:

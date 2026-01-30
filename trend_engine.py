@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 import logging
 import sys
-from enum import Enum
+import time
 import os
+from enum import Enum
+
+from contracts import StrategyContext, TradeIntent, RiskRequest, MarketData, StrategySnapshot
+from advanced_risk import RiskManager
 
 # 配置日志处理器（避免日志只配置级别无输出，生产级必备）
 def setup_logger():
@@ -32,19 +36,8 @@ class TrendState(Enum):
     L2_COMPOUND = 2  # 增厚
     L3_RAMPAGE = 3   # 狂暴
 
-# 尝试导入RiskManager，添加异常处理（生产级容错）
-try:
-    from .advanced_risk import RiskManager
-except ImportError as e:
-    # 若为独立运行（无包结构），尝试直接导入
-    try:
-        from advanced_risk import RiskManager
-    except ImportError:
-        logger.error(f"无法导入RiskManager模块：{e}")
-        raise SystemExit(1)
-
 class TrendEngine:
-    def __init__(self, risk_manager):
+    def __init__(self, risk_manager: RiskManager):
         self.rm = risk_manager
         self.state = TrendState.EMPTY
         
@@ -56,26 +49,27 @@ class TrendEngine:
         self.stop_loss = 0.0      # 止损价格
         self.unrealized_pnl = 0.0 # 未实现浮盈/浮亏，实时更新
 
-    def on_tick(self, data):
+    def on_tick(self, context: StrategyContext) -> TradeIntent | None:
         """
         核心Tick处理函数，接收行情数据并执行状态机逻辑
         :param data: 行情字典，必须包含：price, ema20, atr, rsi, vol_ratio
         :return: 交易意图（intent）| None
         """
         
+        data = context.market_data
+        trace_id = context.trace_id
+
         # 临时调试日志
-        print(f"[TrendEngine] state={self.state}, price={data.get('price')}, rsi={data.get('rsi')}")
+        print(f"[TrendEngine] state={self.state}, price={data.price}, rsi={data.rsi}")
         
         
         # 生产级：校验输入数据完整性，避免KeyError
-        required_fields = ['price', 'ema20', 'atr', 'rsi', 'vol_ratio']
-        for field in required_fields:
-            if field not in data:
-                logger.error(f"行情数据缺失必要字段：{field}")
-                return
-        
-        price = data['price']
-        atr = data['atr']
+        if data.price is None or data.ema20 is None or data.atr is None or data.rsi is None or data.vol_ratio is None:
+            logger.error("行情数据缺失必要字段")
+            return None
+
+        price = data.price
+        atr = data.atr
         
         # --- A. 实时更新浮盈 & 同步风控账本（生产级：实时监控，避免风控滞后） ---
         if self.state != TrendState.EMPTY:
@@ -92,8 +86,8 @@ class TrendEngine:
         # --- C. 状态机逻辑（按持仓状态执行对应策略，逐步加仓） ---
         if self.state == TrendState.EMPTY:
             #if price > data['ema20']:  # 简单均线入场条件，可替换为复杂策略
-            if price > data['ema20'] and data['rsi'] > 70:
-                intent = self._try_open_l1(data)
+            if price > data.ema20 and data.rsi > 70:
+                intent = self._try_open_l1(data, trace_id)
                 if intent: return intent
                 
         elif self.state == TrendState.L1_PROBE:
@@ -102,7 +96,7 @@ class TrendEngine:
                 return
             pnl_pct = (price - self.entry_price) / self.entry_price
             if pnl_pct > 0.015:
-                intent = self._try_open_l2(data)
+                intent = self._try_open_l2(data, trace_id)
                 if intent: return intent
                 
         elif self.state == TrendState.L2_COMPOUND:
@@ -110,8 +104,8 @@ class TrendEngine:
             if self.entry_price <= 0:
                 return
             pnl_pct = (price - self.entry_price) / self.entry_price * self.avg_leverage
-            if pnl_pct > 0.05 and data['rsi'] > 70:
-                intent = self._try_open_l3(data)
+            if pnl_pct > 0.05 and data.rsi > 70:
+                intent = self._try_open_l3(data, trace_id)
                 if intent: return intent
 
     def _update_unrealized_pnl(self, price):
@@ -162,67 +156,71 @@ class TrendEngine:
         if new_stop > self.stop_loss and (new_stop - self.stop_loss) > stop_diff_threshold:
             self.stop_loss = new_stop
 
-    def _try_open_l1(self, data):
+    def _try_open_l1(self, data, trace_id=None):
         """v1.0 尝试开仓L1（侦察兵），返回交易意图（不再内部执行）"""
         # 计算申请资金：趋势总预算的30%（趋势总预算=初始本金*趋势资金占比）
         trend_total_capital = self.rm.initial_capital * self.rm.trend_allocation
         req_capital = trend_total_capital * 0.3
         
         # 构造风控申请参数
-        risk_request = {
-            'engine': 'TREND',
-            'action': 'OPEN_L1',
-            'suggested_leverage': 3,
-            'volatility_ratio': data['vol_ratio'],
-            'estimated_risk': req_capital * 0.1  # 预估10%止损风险
-        }
+        risk_request = RiskRequest(
+            engine="TREND",
+            action="OPEN_L1",
+            suggested_leverage=3,
+            volatility_ratio=data.vol_ratio,
+            estimated_risk=req_capital * 0.1,
+            trace_id=trace_id,
+        )
 
         # v1.0 不 approve，不 execute，只返回意图
         # size MVP：用 (保证金*杠杆)/price 近似，后面再按 Bitget 合约单位精化
-        suggested_lev = risk_request["suggested_leverage"]
-        size = (req_capital * suggested_lev) / max(1e-9, data["price"])
+        suggested_lev = risk_request.suggested_leverage
+        size = (req_capital * suggested_lev) / max(1e-9, data.price)
 
-        return {
-            "engine": "TREND",
-            "action": "OPEN_L1",
-            "trade_side": "open",
-            "pos_side": "long",
-            "size": size,
-            "marginMode": "crossed",
-            "risk_request": risk_request
-        }
+        return TradeIntent(
+            engine="TREND",
+            action="OPEN_L1",
+            trade_side="open",
+            pos_side="long",
+            size=size,
+            margin_mode="crossed",
+            risk_request=risk_request,
+            trace_id=trace_id,
+        )
 
-    def _try_open_l2(self, data):
+    def _try_open_l2(self, data, trace_id=None):
         """v1.0 尝试加仓L2（增厚），返回交易意图（不再内部执行）"""
         # 计算申请资金：趋势总预算的30%
         trend_total_capital = self.rm.initial_capital * self.rm.trend_allocation
         req_capital = trend_total_capital * 0.3
         
         # 构造风控申请参数
-        risk_request = {
-            'engine': 'TREND',
-            'action': 'ADD_L2',
-            'suggested_leverage': 5,
-            'volatility_ratio': data['vol_ratio'],
-            'estimated_risk': req_capital * 0.05  # 预估5%止损风险（加仓风险降低）
-        }
+        risk_request = RiskRequest(
+            engine="TREND",
+            action="ADD_L2",
+            suggested_leverage=5,
+            volatility_ratio=data.vol_ratio,
+            estimated_risk=req_capital * 0.05,
+            trace_id=trace_id,
+        )
 
         # v1.0 不 approve，不 execute，只返回意图
         # size MVP：用 (保证金*杠杆)/price 近似，后面再按 Bitget 合约单位精化
-        suggested_lev = risk_request["suggested_leverage"]
-        size = (req_capital * suggested_lev) / max(1e-9, data["price"])
+        suggested_lev = risk_request.suggested_leverage
+        size = (req_capital * suggested_lev) / max(1e-9, data.price)
 
-        return {
-            "engine": "TREND",
-            "action": "ADD_L2",
-            "trade_side": "open",
-            "pos_side": "long",
-            "size": size,
-            "marginMode": "crossed",
-            "risk_request": risk_request
-        }
+        return TradeIntent(
+            engine="TREND",
+            action="ADD_L2",
+            trade_side="open",
+            pos_side="long",
+            size=size,
+            margin_mode="crossed",
+            risk_request=risk_request,
+            trace_id=trace_id,
+        )
 
-    def _try_open_l3(self, data):
+    def _try_open_l3(self, data, trace_id=None):
         """v1.0 尝试加仓L3（狂暴），返回交易意图（不再内部执行）"""
         # 1. 自查：已实现盈利≥20U（生产级：双重校验，避免风控穿透）
         if self.rm.realized_profit < 20:
@@ -233,28 +231,30 @@ class TrendEngine:
         profit_bet = self.rm.realized_profit * 0.8
         
         # 3. 构造风控申请参数
-        risk_request = {
-            'engine': 'TREND',
-            'action': 'ADD_L3',
-            'suggested_leverage': 10,
-            'volatility_ratio': data['vol_ratio'],
-            'estimated_risk': profit_bet
-        }
+        risk_request = RiskRequest(
+            engine="TREND",
+            action="ADD_L3",
+            suggested_leverage=10,
+            volatility_ratio=data.vol_ratio,
+            estimated_risk=profit_bet,
+            trace_id=trace_id,
+        )
 
         # v1.0 不 approve，不 execute，只返回意图
         # size MVP：用 (保证金*杠杆)/price 近似，后面再按 Bitget 合约单位精化
-        suggested_lev = risk_request["suggested_leverage"]
-        size = (profit_bet * suggested_lev) / max(1e-9, data["price"])
+        suggested_lev = risk_request.suggested_leverage
+        size = (profit_bet * suggested_lev) / max(1e-9, data.price)
 
-        return {
-            "engine": "TREND",
-            "action": "ADD_L3",
-            "trade_side": "open",
-            "pos_side": "long",
-            "size": size,
-            "marginMode": "crossed",
-            "risk_request": risk_request
-        }
+        return TradeIntent(
+            engine="TREND",
+            action="ADD_L3",
+            trade_side="open",
+            pos_side="long",
+            size=size,
+            margin_mode="crossed",
+            risk_request=risk_request,
+            trace_id=trace_id,
+        )
 
     def _execute_trade(self, price, margin, lev, new_state):
         """生产级：执行交易，正确计算平均杠杆、加权入场价、占用保证金"""
@@ -300,21 +300,21 @@ class TrendEngine:
         self.stop_loss = 0.0
         self.unrealized_pnl = 0.0
 
-        return {
-            "engine": "TREND",
-            "action": "CLOSE",
-            "trade_side": "close",
-            "pos_side": "long",
-            "size": 0.001,  # MVP：先给个最小值；后面要用 AccountState 的真实持仓数量
-            "marginMode": "crossed",
-            "risk_request": {
-                "engine": "TREND",
-                "action": "CLOSE",
-                "suggested_leverage": 1,
-                "volatility_ratio": 1.0,
-                "estimated_risk": 0.0
-            }
-        }
+        return TradeIntent(
+            engine="TREND",
+            action="CLOSE",
+            trade_side="close",
+            pos_side="long",
+            size=0.001,
+            margin_mode="crossed",
+            risk_request=RiskRequest(
+                engine="TREND",
+                action="CLOSE",
+                suggested_leverage=1,
+                volatility_ratio=1.0,
+                estimated_risk=0.0,
+            ),
+        )
 
 # ==========================================
 # 生产级极限博弈测试套件（独立运行时执行，覆盖全场景）
@@ -330,6 +330,16 @@ if __name__ == "__main__":
     # 前置清理：删除残留的测试文件
     if os.path.exists(test_state_file):
         os.remove(test_state_file)
+
+    def build_context(data):
+        return StrategyContext(
+            market_data=data,
+            account_snapshot=StrategySnapshot(account=None, positions={}, position_uncertain=False),
+            system_mode="NORMAL",
+            risk_regime="NORMAL",
+            state_confidence=None,
+            trace_id="test-trace",
+        )
 
     def run_scenario(name, data_feed, init_profit=0, manual_balance_override=None):
         """
@@ -364,7 +374,7 @@ if __name__ == "__main__":
         
         # 执行Tick数据处理
         for i, tick in enumerate(data_feed):
-            intent = te.on_tick(tick)
+            intent = te.on_tick(build_context(tick))
             if intent:
                 print(f"    [触发交易意图] 场景{i+1} Tick{i+1} | 意图详情: {intent}")
         
@@ -382,54 +392,54 @@ if __name__ == "__main__":
     # --- 场景 1: 贫穷陷阱 (Poverty Trap) ---
     # 核心：无实盈强开L3，被自查+风控拦截
     data_poverty = [
-        {'price': 100, 'ema20': 99, 'atr': 1, 'rsi': 50, 'vol_ratio': 1.0},
-        {'price': 102, 'ema20': 100, 'atr': 1, 'rsi': 60, 'vol_ratio': 1.0},
-        {'price': 108, 'ema20': 102, 'atr': 1, 'rsi': 75, 'vol_ratio': 1.0},
+        MarketData(price=100, ema20=99, atr=1, rsi=50, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=102, ema20=100, atr=1, rsi=60, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=108, ema20=102, atr=1, rsi=75, vol_ratio=1.0, ts=time.time()),
     ]
     rm1 = run_scenario("贫穷陷阱 (没利润强开L3)", data_poverty)
     
     # --- 场景 2: 波动率降维打击 (High Volatility) ---
     # 核心：高vol_ratio（2.0）触发杠杆降档（3x→2x）
     data_high_vol = [
-        {'price': 100, 'ema20': 99, 'atr': 2, 'rsi': 50, 'vol_ratio': 2.0},
+        MarketData(price=100, ema20=99, atr=2, rsi=50, vol_ratio=2.0, ts=time.time()),
     ]
     rm2 = run_scenario("波动率打击 (高波降杠杆)", data_high_vol)
     
     # --- 场景 3: 完美风暴 (The Perfect Storm) ---
     # 核心：注入35U实盈，全流程L1→L2→L3→止损，账本更新准确
     data_perfect = [
-        {'price': 100, 'ema20': 99, 'atr': 1, 'rsi': 50, 'vol_ratio': 1.0},
-        {'price': 102, 'ema20': 100, 'atr': 1, 'rsi': 60, 'vol_ratio': 1.0},
-        {'price': 110, 'ema20': 105, 'atr': 1, 'rsi': 80, 'vol_ratio': 1.0},
-        {'price': 115, 'ema20': 110, 'atr': 1, 'rsi': 85, 'vol_ratio': 1.0},
-        {'price': 114, 'ema20': 112, 'atr': 1, 'rsi': 40, 'vol_ratio': 1.0},
+        MarketData(price=100, ema20=99, atr=1, rsi=50, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=102, ema20=100, atr=1, rsi=60, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=110, ema20=105, atr=1, rsi=80, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=115, ema20=110, atr=1, rsi=85, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=114, ema20=112, atr=1, rsi=40, vol_ratio=1.0, ts=time.time()),
     ]
     rm3 = run_scenario("完美风暴 (全流程通关)", data_perfect, init_profit=35)
     
     # --- 场景 4: 熔断测试 (Margin Call) ---
     # 核心：余额150U（权益0.75<0.8），触发权益熔断，L1被拒
     data_margin = [
-        {'price': 100, 'ema20': 99, 'atr': 1, 'rsi': 50, 'vol_ratio': 1.0},
+        MarketData(price=100, ema20=99, atr=1, rsi=50, vol_ratio=1.0, ts=time.time()),
     ]
     rm4 = run_scenario("熔断测试 (本金不足触发权益熔断)", data_margin, manual_balance_override=150)
     
     # --- 场景 5: 水位线重置测试 (Anchor Capital Upgrade) ---
     # 核心：趋势盈利≥40U（200*1.2=240），触发锚定本金上台阶
     data_anchor_upgrade = [
-        {'price': 100, 'ema20': 99, 'atr': 1, 'rsi': 50, 'vol_ratio': 1.0},
-        {'price': 105, 'ema20': 100, 'atr': 1, 'rsi': 60, 'vol_ratio': 1.0},
-        {'price': 115, 'ema20': 105, 'atr': 1, 'rsi': 80, 'vol_ratio': 1.0},
-        {'price': 130, 'ema20': 110, 'atr': 1, 'rsi': 85, 'vol_ratio': 1.0},
-        {'price': 128, 'ema20': 115, 'atr': 1, 'rsi': 40, 'vol_ratio': 1.0},
+        MarketData(price=100, ema20=99, atr=1, rsi=50, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=105, ema20=100, atr=1, rsi=60, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=115, ema20=105, atr=1, rsi=80, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=130, ema20=110, atr=1, rsi=85, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=128, ema20=115, atr=1, rsi=40, vol_ratio=1.0, ts=time.time()),
     ]
     rm5 = run_scenario("水位线重置 (盈利触发锚定本金上台阶)", data_anchor_upgrade, init_profit=30)
     
     # --- 场景 6: 趋势浮亏超预算测试 (Unrealized PnL Exceed Budget) ---
     # 核心：持仓浮亏扩大，触发风控熔断，拦截加仓
     data_unrealized_loss = [
-        {'price': 100, 'ema20': 99, 'atr': 1, 'rsi': 50, 'vol_ratio': 1.0},
-        {'price': 98, 'ema20': 100, 'atr': 1, 'rsi': 40, 'vol_ratio': 1.0},
-        {'price': 95, 'ema20': 99, 'atr': 1, 'rsi': 30, 'vol_ratio': 1.0},
+        MarketData(price=100, ema20=99, atr=1, rsi=50, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=98, ema20=100, atr=1, rsi=40, vol_ratio=1.0, ts=time.time()),
+        MarketData(price=95, ema20=99, atr=1, rsi=30, vol_ratio=1.0, ts=time.time()),
     ]
     rm6 = run_scenario("趋势浮亏超预算 (拦截加仓)", data_unrealized_loss, init_profit=20)
     
