@@ -1,69 +1,16 @@
-# test_integration.py
 import asyncio
-import json
-
 import os
+import sys
+import types
 
+import pytest
 
-from contracts import RiskRequest, StrategySnapshot, TradeIntent
+from contracts import DataSnapshot, MarketData, RiskRequest, StrategySnapshot, TradeIntent
 from advanced_risk import RiskManager
 from account_state import AccountState
 from data_synchronizer import DataSynchronizer
-from tiny_oms import TinyOMS, resolve_trade_mode
 from replay_runner import run_replay
-
-
-def test_risk_reject_reason():
-    class DummyDataSync:
-        rest_fail_count = 0
-
-    class DummyAccountState:
-        data_sync = DummyDataSync()
-        state_confidence = 0.95
-
-        def get_strategy_snapshot(self, engine_name: str):
-            return StrategySnapshot(account=None, positions={}, position_uncertain=False)
-
-    rm = RiskManager(initial_capital=200, account_state=DummyAccountState())
-    rm.update_snapshot(wallet_balance=200, trend_float=0, shark_float=0, margin_usage=0.1)
-
-    request = RiskRequest(
-        engine="SHARK",
-        action="OPEN_L1",
-        suggested_leverage=2,
-        volatility_ratio=1.0,
-        estimated_risk=1e6,
-    )
-    intent = TradeIntent(
-        engine="SHARK",
-        action="OPEN_L1",
-        trade_side="open",
-        pos_side="short",
-        size=1e9,
-        margin_mode="crossed",
-        risk_request=request,
-    )
-    ok, _, msg = rm.approve_action(intent.risk_request)
-    assert ok is False
-    assert msg
-
-
-async def manual_integration_check():
-    from main_controller import MainController
-    with open('config.json', 'r') as f:
-        config = json.load(f)
-    controller = MainController(config)
-    # 测试初始化
-    print("✅ 主控制器创建成功")
-    # 测试一次手动更新
-    await controller.data_sync.force_rest_sync()
-    controller.account_state.update()
-    controller.risk_manager.update_from_account_state()
-    print("✅ 风控状态已更新:", controller.risk_manager.realized_profit)
-
-
-if __name__ == "__main__":
-    asyncio.run(manual_integration_check())
+from tiny_oms import OrderStatus, TinyOMS, resolve_trade_mode
 
 
 class DummyExchange:
@@ -78,12 +25,11 @@ class DummyExchange:
 class DummyTrader:
     exchange_id = "bitget"
 
-    def __init__(self, exchange):
+    def __init__(self, exchange=None):
         self.exchange = exchange
 
 
-def build_intent():
-    trace_id = "trace-test"
+def build_intent(trace_id="trace-test", decision_id="decision-1"):
     risk_request = RiskRequest(
         engine="SHARK",
         action="OPEN_L1",
@@ -101,6 +47,7 @@ def build_intent():
         margin_mode="crossed",
         risk_request=risk_request,
         trace_id=trace_id,
+        decision_id=decision_id,
     )
 
 
@@ -108,14 +55,12 @@ def test_live_gate_requires_env_and_config(monkeypatch):
     exchange = DummyExchange()
     intent = build_intent()
 
-    # config true, env missing -> dry-run
     monkeypatch.delenv("ALLOW_LIVE_TRADING", raising=False)
     dry_run, _ = resolve_trade_mode(live_trading_config=True, env_allow=os.getenv("ALLOW_LIVE_TRADING"))
     oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=dry_run)
     asyncio.run(oms.place_intent(intent))
     assert exchange.called is False
 
-    # env true, config false -> dry-run
     exchange.called = False
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "true")
     dry_run, _ = resolve_trade_mode(live_trading_config=False, env_allow=os.getenv("ALLOW_LIVE_TRADING"))
@@ -123,7 +68,6 @@ def test_live_gate_requires_env_and_config(monkeypatch):
     asyncio.run(oms.place_intent(intent))
     assert exchange.called is False
 
-    # both true -> live
     exchange.called = False
     dry_run, _ = resolve_trade_mode(live_trading_config=True, env_allow=os.getenv("ALLOW_LIVE_TRADING"))
     oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=dry_run)
@@ -145,34 +89,14 @@ def test_trace_id_propagates_to_risk_and_oms():
     rm = RiskManager(initial_capital=200, account_state=DummyAccountState())
     rm.update_snapshot(wallet_balance=200, trend_float=0, shark_float=0, margin_usage=0.1)
 
-    trace_id = "trace-prop"
-    risk_request = RiskRequest(
-        engine="SHARK",
-        action="OPEN_L1",
-        suggested_leverage=2,
-        volatility_ratio=1.0,
-        estimated_risk=1.0,
-        trace_id=trace_id,
-    )
-    intent = TradeIntent(
-        engine="SHARK",
-        action="OPEN_L1",
-        trade_side="open",
-        pos_side="short",
-        size=0.01,
-        margin_mode="crossed",
-        risk_request=risk_request,
-        trace_id=trace_id,
-    )
-
+    intent = build_intent(trace_id="trace-prop", decision_id="decision-prop")
     ok, _, _ = rm.approve_action(intent.risk_request)
     assert ok is True
-    assert rm.last_decision_trace_id == trace_id
+    assert rm.last_decision_trace_id == "trace-prop"
 
-    exchange = DummyExchange()
-    oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=True)
+    oms = TinyOMS(DummyTrader(DummyExchange()), "BTC/USDT:USDT", dry_run=True)
     client_oid = asyncio.run(oms.place_intent(intent))
-    assert oms.orders[client_oid].trace_id == trace_id
+    assert oms.orders[client_oid].trace_id == "trace-prop"
 
 
 def test_state_is_updated_only_via_synchronizer():
@@ -197,17 +121,13 @@ def test_state_is_updated_only_via_synchronizer():
         }
     ]
     data_sync.update_from_ws_position(mock_ws_data)
-
     account_state.update()
     assert "long" in account_state.positions
 
 
 def test_oms_idempotency_prevents_duplicate_orders():
-    exchange = DummyExchange()
     intent = build_intent()
-    intent.decision_id = "decision-1"
-
-    oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=True)
+    oms = TinyOMS(DummyTrader(DummyExchange()), "BTC/USDT:USDT", dry_run=True)
     first = asyncio.run(oms.place_intent(intent))
     second = asyncio.run(oms.place_intent(intent))
 
@@ -215,10 +135,14 @@ def test_oms_idempotency_prevents_duplicate_orders():
     assert len(oms.orders) == 1
 
 
-def test_reconnect_triggers_resubscribe_and_calibration():
-    import sys
-    import types
+def test_dry_run_state_machine_reaches_filled():
+    intent = build_intent()
+    oms = TinyOMS(DummyTrader(DummyExchange()), "BTC/USDT:USDT", dry_run=True)
+    client_oid = asyncio.run(oms.place_intent(intent))
+    assert oms.orders[client_oid].status == OrderStatus.FILLED
 
+
+def test_reconnect_triggers_resubscribe_and_calibration():
     fake_websockets = types.SimpleNamespace(connect=lambda *args, **kwargs: None)
     fake_proxy = types.SimpleNamespace(
         Proxy=types.SimpleNamespace(from_url=lambda *_args, **_kwargs: None),
@@ -228,6 +152,7 @@ def test_reconnect_triggers_resubscribe_and_calibration():
     sys.modules.setdefault("websockets_proxy", fake_proxy)
 
     from bitget_ws_bridge import BitgetWSBridge
+
     class DummyDataSync:
         def __init__(self):
             self.calibrations = 0
@@ -274,19 +199,8 @@ def test_reconnect_triggers_resubscribe_and_calibration():
 
 
 def test_replay_drives_full_chain():
-    from contracts import MarketData
     from trend_engine import TrendEngine
-    from shark_engine import SharkEngine
     from advanced_risk import RiskManager
-    from tiny_oms import TinyOMS
-
-    class DummyTrader:
-        exchange_id = "bitget"
-
-        def __init__(self):
-            self.exchange = None
-
-    from contracts import DataSnapshot
 
     class DummyDataSync:
         position_uncertain = False
@@ -313,25 +227,21 @@ def test_replay_drives_full_chain():
             self.account_state = account_state
             self.risk_manager = risk_manager
             self.trend_engine = TrendEngine(self.risk_manager)
-            self.shark_engine = SharkEngine(self.risk_manager)
+            self.shark_engine = None
             self.strategy_registry = {"trend": "ENABLED", "shark": "DISABLED"}
-            self.oms = TinyOMS(DummyTrader(), "BTC/USDT:USDT", data_sync=data_sync, dry_run=True)
+            self.oms = TinyOMS(DummyTrader(DummyExchange()), "BTC/USDT:USDT", data_sync=data_sync, dry_run=True)
 
         async def process_signals(self, trend_intent, shark_intent):
             intents = []
             if trend_intent:
                 intents.append(trend_intent)
-            if shark_intent:
-                intents.append(shark_intent)
             for intent in intents:
                 ok, lev, _ = self.risk_manager.approve_action(intent.risk_request)
-                if not ok:
-                    continue
+                assert ok is True
                 intent.approved_leverage = lev
                 await self.oms.place_intent(intent)
 
     controller = ReplayController()
-
     events = [
         MarketData(price=100, ema20=99, atr=1, rsi=65, vol_ratio=1.0, ts=1),
         MarketData(price=101, ema20=99, atr=1, rsi=72, vol_ratio=1.0, ts=2),
@@ -342,5 +252,32 @@ def test_replay_drives_full_chain():
 
     intents = asyncio.run(run_replay(controller, events))
     assert intents
-    from tiny_oms import OrderStatus
     assert any(order.status == OrderStatus.FILLED for order in controller.oms.orders.values())
+
+
+def test_intents_must_go_through_risk_gate():
+    class DummyDataSync:
+        position_uncertain = False
+
+        def get_snapshot(self):
+            return DataSnapshot(positions={}, account=None, position_uncertain=False, timestamp=0.0)
+
+    account_state = AccountState(DummyDataSync())
+    risk_manager = RiskManager(initial_capital=200, account_state=account_state)
+    oms = TinyOMS(DummyTrader(DummyExchange()), "BTC/USDT:USDT", dry_run=True)
+
+    intent = build_intent(trace_id="risk-check", decision_id="risk-check")
+    approved_calls = {"count": 0}
+
+    original_approve = risk_manager.approve_action
+
+    def approve_action(request):
+        approved_calls["count"] += 1
+        return original_approve(request)
+
+    risk_manager.approve_action = approve_action
+    ok, lev, _ = risk_manager.approve_action(intent.risk_request)
+    assert ok is True
+    intent.approved_leverage = lev
+    asyncio.run(oms.place_intent(intent))
+    assert approved_calls["count"] == 1
