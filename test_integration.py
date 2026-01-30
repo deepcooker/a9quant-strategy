@@ -10,6 +10,7 @@ from advanced_risk import RiskManager
 from account_state import AccountState
 from data_synchronizer import DataSynchronizer
 from tiny_oms import TinyOMS, resolve_trade_mode
+from replay_runner import run_replay
 
 
 def test_risk_reject_reason():
@@ -270,3 +271,76 @@ def test_reconnect_triggers_resubscribe_and_calibration():
     asyncio.run(bridge.on_private_reconnect())
     assert bridge.private_reconnect_count == 1
     assert data_sync.calibrations == 3
+
+
+def test_replay_drives_full_chain():
+    from contracts import MarketData
+    from trend_engine import TrendEngine
+    from shark_engine import SharkEngine
+    from advanced_risk import RiskManager
+    from tiny_oms import TinyOMS
+
+    class DummyTrader:
+        exchange_id = "bitget"
+
+        def __init__(self):
+            self.exchange = None
+
+    from contracts import DataSnapshot
+
+    class DummyDataSync:
+        position_uncertain = False
+
+        def get_snapshot(self):
+            return DataSnapshot(positions={}, account=None, position_uncertain=False, timestamp=0.0)
+
+        def mark_order_sent(self):
+            return None
+
+        def report_execution_event(self, *_args, **_kwargs):
+            return None
+
+        def is_private_ready(self, *_args, **_kwargs):
+            return True
+
+    data_sync = DummyDataSync()
+    account_state = AccountState(data_sync)
+    risk_manager = RiskManager(initial_capital=200, account_state=account_state)
+
+    class ReplayController:
+        def __init__(self):
+            self.data_sync = data_sync
+            self.account_state = account_state
+            self.risk_manager = risk_manager
+            self.trend_engine = TrendEngine(self.risk_manager)
+            self.shark_engine = SharkEngine(self.risk_manager)
+            self.strategy_registry = {"trend": "ENABLED", "shark": "DISABLED"}
+            self.oms = TinyOMS(DummyTrader(), "BTC/USDT:USDT", data_sync=data_sync, dry_run=True)
+
+        async def process_signals(self, trend_intent, shark_intent):
+            intents = []
+            if trend_intent:
+                intents.append(trend_intent)
+            if shark_intent:
+                intents.append(shark_intent)
+            for intent in intents:
+                ok, lev, _ = self.risk_manager.approve_action(intent.risk_request)
+                if not ok:
+                    continue
+                intent.approved_leverage = lev
+                await self.oms.place_intent(intent)
+
+    controller = ReplayController()
+
+    events = [
+        MarketData(price=100, ema20=99, atr=1, rsi=65, vol_ratio=1.0, ts=1),
+        MarketData(price=101, ema20=99, atr=1, rsi=72, vol_ratio=1.0, ts=2),
+        MarketData(price=102, ema20=100, atr=1, rsi=75, vol_ratio=1.0, ts=3),
+        MarketData(price=103, ema20=100, atr=1, rsi=74, vol_ratio=1.0, ts=4),
+        MarketData(price=104, ema20=101, atr=1, rsi=73, vol_ratio=1.0, ts=5),
+    ]
+
+    intents = asyncio.run(run_replay(controller, events))
+    assert intents
+    from tiny_oms import OrderStatus
+    assert any(order.status == OrderStatus.FILLED for order in controller.oms.orders.values())

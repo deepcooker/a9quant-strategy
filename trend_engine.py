@@ -87,7 +87,7 @@ class TrendEngine:
         if self.state == TrendState.EMPTY:
             #if price > data['ema20']:  # 简单均线入场条件，可替换为复杂策略
             if price > data.ema20 and data.rsi > 70:
-                intent = self._try_open_l1(data)
+                intent = self._try_open_l1(data, trace_id)
                 if intent: return intent
                 
         elif self.state == TrendState.L1_PROBE:
@@ -96,7 +96,7 @@ class TrendEngine:
                 return
             pnl_pct = (price - self.entry_price) / self.entry_price
             if pnl_pct > 0.015:
-                intent = self._try_open_l2(data)
+                intent = self._try_open_l2(data, trace_id)
                 if intent: return intent
                 
         elif self.state == TrendState.L2_COMPOUND:
@@ -105,7 +105,7 @@ class TrendEngine:
                 return
             pnl_pct = (price - self.entry_price) / self.entry_price * self.avg_leverage
             if pnl_pct > 0.05 and data.rsi > 70:
-                intent = self._try_open_l3(data)
+                intent = self._try_open_l3(data, trace_id)
                 if intent: return intent
 
     def _update_unrealized_pnl(self, price):
@@ -156,7 +156,7 @@ class TrendEngine:
         if new_stop > self.stop_loss and (new_stop - self.stop_loss) > stop_diff_threshold:
             self.stop_loss = new_stop
 
-    def _try_open_l1(self, data):
+    def _try_open_l1(self, data, trace_id=None):
         """v1.0 尝试开仓L1（侦察兵），返回交易意图（不再内部执行）"""
         # 计算申请资金：趋势总预算的30%（趋势总预算=初始本金*趋势资金占比）
         trend_total_capital = self.rm.initial_capital * self.rm.trend_allocation
@@ -188,7 +188,7 @@ class TrendEngine:
             trace_id=trace_id,
         )
 
-    def _try_open_l2(self, data):
+    def _try_open_l2(self, data, trace_id=None):
         """v1.0 尝试加仓L2（增厚），返回交易意图（不再内部执行）"""
         # 计算申请资金：趋势总预算的30%
         trend_total_capital = self.rm.initial_capital * self.rm.trend_allocation
@@ -220,7 +220,7 @@ class TrendEngine:
             trace_id=trace_id,
         )
 
-    def _try_open_l3(self, data):
+    def _try_open_l3(self, data, trace_id=None):
         """v1.0 尝试加仓L3（狂暴），返回交易意图（不再内部执行）"""
         # 1. 自查：已实现盈利≥20U（生产级：双重校验，避免风控穿透）
         if self.rm.realized_profit < 20:
