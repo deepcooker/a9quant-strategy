@@ -14,6 +14,8 @@ class BitgetWSBridge(BaseBitgetWsClient):
         self.market_hub = market_hub
         self.data_sync = data_sync
         self.oms = oms
+        self.public_reconnect_count = 0
+        self.private_reconnect_count = 0
 
     def get_sign(self, timestamp: str) -> str:
         return self.generate_sign(timestamp, self.secret)
@@ -46,3 +48,18 @@ class BitgetWSBridge(BaseBitgetWsClient):
 
     async def on_private_account(self, account_data: dict):
         self.data_sync.update_from_ws_account(account_data)
+
+    async def on_public_disconnect(self):
+        self.data_sync.mark_ws_public_disconnect()
+
+    async def on_private_disconnect(self):
+        self.data_sync.mark_ws_private_disconnect()
+
+    async def on_public_reconnect(self):
+        self.public_reconnect_count += 1
+
+    async def on_private_reconnect(self):
+        self.private_reconnect_count += 1
+        await self.data_sync.calibrate_positions()
+        await self.data_sync.calibrate_balance()
+        await self.data_sync.calibrate_orders()
