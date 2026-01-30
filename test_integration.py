@@ -25,6 +25,7 @@ def test_risk_reject_reason():
             return StrategySnapshot(account=None, positions={}, position_uncertain=False)
 
     rm = RiskManager(initial_capital=200, account_state=DummyAccountState())
+    rm.anchor_capital = 200
     rm.update_snapshot(wallet_balance=200, trend_float=0, shark_float=0, margin_usage=0.1)
 
     request = RiskRequest(
@@ -143,6 +144,7 @@ def test_trace_id_propagates_to_risk_and_oms():
             return StrategySnapshot(account=None, positions={}, position_uncertain=False)
 
     rm = RiskManager(initial_capital=200, account_state=DummyAccountState())
+    rm.anchor_capital = 200
     rm.update_snapshot(wallet_balance=200, trend_float=0, shark_float=0, margin_usage=0.1)
     from advanced_risk import PolicyDecision, SystemMode, RiskRegime
     rm.evaluate_policy = lambda: PolicyDecision(SystemMode.NORMAL, RiskRegime.NORMAL, ["OPEN"], [], "test", 0.0)
