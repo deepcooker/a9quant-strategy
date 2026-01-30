@@ -7,6 +7,8 @@ from typing import Dict, Any, Optional, Tuple
 
 from contracts import TradeIntent
 
+from contracts import TradeIntent
+
 logger = logging.getLogger("TinyOMS")
 
 def resolve_trade_mode(live_trading_config: bool, env_allow: Optional[str]) -> Tuple[bool, str]:
