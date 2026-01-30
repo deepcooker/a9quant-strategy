@@ -4,6 +4,8 @@ from collections import deque
 from dataclasses import dataclass
 from threading import Lock
 
+from contracts import MarketData
+
 @dataclass
 class Candle:
     ts: float
@@ -93,15 +95,15 @@ class MarketDataHub:
             avgv = sum(vols[-20:]) / 20
             self._vol_ratio = (vols[-1] / avgv) if avgv > 0 else 1.0
 
-    def get_latest(self):
+    def get_latest(self) -> MarketData | None:
         with self._lock:
             if self._latest_price is None:
                 return None
-            return {
-                "price": self._latest_price,
-                "ema20": self._ema20,
-                "atr": self._atr14,
-                "rsi": self._rsi14,
-                "vol_ratio": self._vol_ratio,
-                "ts": self._latest_ts
-            }
+            return MarketData(
+                price=self._latest_price,
+                ema20=self._ema20,
+                atr=self._atr14,
+                rsi=self._rsi14,
+                vol_ratio=self._vol_ratio,
+                ts=self._latest_ts,
+            )
