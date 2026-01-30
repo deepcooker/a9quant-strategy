@@ -3,31 +3,13 @@ import asyncio
 import time
 import logging
 from typing import Dict, Any, Optional
-from dataclasses import dataclass
 from threading import Lock
+
+from contracts import DataSnapshot, RawPosition, RawAccount
 
 logger = logging.getLogger('DataSync')
 
-@dataclass
-class RawPosition:
-    """交易所原始持仓数据容器"""
-    symbol: str
-    side: str  # 'long' / 'short'
-    size: float  # 持仓数量(币)
-    entry_price: float
-    unrealized_pnl: float
-    leverage: float
-    margin: float  # 占用保证金
-    timestamp: float  # 数据更新时间
-
-@dataclass
-class RawAccount:
-    """交易所原始账户数据容器"""
-    equity: float  # 权益 (余额 + 未实现盈亏)
-    wallet_balance: float  # 钱包余额 (已实现部分)
-    available_balance: float  # 可用余额
-    margin_ratio: float  # 保证金率
-    timestamp: float
+"""使用 contracts.RawPosition / RawAccount 作为跨模块数据契约。"""
 
 class DataSynchronizer:
     """
@@ -207,15 +189,30 @@ class DataSynchronizer:
             logger.error(f"❌ REST同步失败: {e}")
             return False
 
-    def get_snapshot(self) -> Dict[str, Any]:
+    async def calibrate_positions(self) -> bool:
+        """校准持仓（SoT 入口）：仅由同步器写入状态。"""
+        logger.info("🧭 校准持仓触发")
+        return await self.force_rest_sync()
+
+    async def calibrate_balance(self) -> bool:
+        """校准余额（SoT 入口）：仅由同步器写入状态。"""
+        logger.info("🧭 校准余额触发")
+        return await self.force_rest_sync()
+
+    async def calibrate_orders(self) -> bool:
+        """校准订单（SoT 入口）：仅由同步器写入状态。"""
+        logger.info("🧭 校准订单触发")
+        return await self.force_rest_sync()
+
+    def get_snapshot(self) -> DataSnapshot:
         """获取当前数据快照（线程安全）"""
         with self._lock:
-            return {
-                'positions': {k: v.__dict__ for k, v in self._raw_positions.items()},
-                'account': self._raw_account.__dict__ if self._raw_account else None,
-                'position_uncertain': self.position_uncertain,
-                'timestamp': time.time()
-            }
+            return DataSnapshot(
+                positions=dict(self._raw_positions),
+                account=self._raw_account,
+                position_uncertain=self.position_uncertain,
+                timestamp=time.time(),
+            )
     
     # v1.2 新增一致性评分方法
     def get_consistency_score(self) -> float:
