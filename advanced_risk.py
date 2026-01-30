@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 import time  # v1.2
+from contracts import RiskRequest
 
 # ==========================================
 # 1. 配置顶级日志
@@ -93,6 +94,7 @@ class RiskManager:
         self._last_seen_exec_seq = 0
         self.rebuild_ok_streak = 0
         self.rebuild_need_streak = 3  # 建议 3~5，你可以改成 5，更稳
+        self.last_decision_trace_id = None
 
 
     def _load_state(self):
@@ -185,8 +187,8 @@ class RiskManager:
         state_conf = getattr(self.account_state, "state_confidence", None)
         if state_conf is None:
             # 没有就降级处理：用 position_uncertain 粗糙替代
-            snap = self.account_state.get_strategy_snapshot("trend") or {}
-            pos_unc = snap.get("position_uncertain", False)
+            snap = self.account_state.get_strategy_snapshot("trend")
+            pos_unc = snap.position_uncertain if snap else False
             state_conf = 0.4 if pos_unc else 0.7
 
         # margin_usage（你已有）
@@ -202,7 +204,7 @@ class RiskManager:
         prev = self.system_mode
 
         # 1) 进入 FROZEN
-        if state_conf < 0.4 or getattr(self.account_state.data_sync, "rest_fail_count", 0) >= 5:
+        if state_conf < 0.4 or getattr(self.account_state.data_sync, "rest_fail_count", 0) >= 5 or getattr(self.account_state.data_sync, "ws_disconnect_count", 0) >= 5:
             self.system_mode = SystemMode.FROZEN
             self.mode_reason = f"frozen: state_conf={state_conf:.2f} rest_fail={getattr(self.account_state.data_sync, 'rest_fail_count', 0)}"
 
@@ -289,75 +291,86 @@ class RiskManager:
         approved = min(20, approved)
         return approved, reason
 
-    def approve_action(self, request):
+    def approve_action(self, request: RiskRequest):
         # ===== 宪法闸门：系统模式先于策略 ===== v1.2
+        self.last_decision_trace_id = request.trace_id
         policy = self.evaluate_policy()
 
-        action = str(request.get("action", "")).upper()
+        action = str(request.action).upper()
 
         if policy.system_mode == SystemMode.FROZEN:
+            logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason={policy.reason}")
             return False, 0, f"拒绝(FROZEN): {policy.reason}"
 
         if policy.system_mode == SystemMode.DEFENSIVE:
             if "CLOSE" not in action and "REDUCE" not in action:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason={policy.reason}")
                 return False, 0, f"拒绝(DEFENSIVE): 只允许减仓/平仓 | {policy.reason}"
 
         if policy.system_mode == SystemMode.REBUILD:
             # REBUILD：允许但夹紧杠杆（你原逻辑里会进一步调整）
             # 这里先做一个总上限，避免任何策略在重建期放大
-            if request.get("suggested_leverage", 1) > 3:
-                request = dict(request)
-                request["suggested_leverage"] = 3
+            if request.suggested_leverage > 3:
+                request = request.__class__(**{**request.__dict__, "suggested_leverage": 3})
 
         current_wallet = self.anchor_capital + self.realized_profit
         # ========== 改动点7：使用有效资金计算权益，避免风控抖动 ==========
         effective_equity = self.get_effective_equity()
-        budget = self.get_shark_budget() if request['engine'] == 'SHARK' else self.get_trend_budget() # 新增：趋势预算
+        budget = self.get_shark_budget() if request.engine == 'SHARK' else self.get_trend_budget() # 新增：趋势预算
 
         # 通用熔断检查（所有引擎共享）
         if effective_equity / self.anchor_capital < self.max_drawdown_limit:
+            logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=drawdown")
             return False, 0, f"拒绝(熔断): 有效资金{effective_equity:.1f}U < 熔断线{self.anchor_capital*self.max_drawdown_limit:.1f}U"
 
         if self.current_margin_usage > self.max_margin_limit:
+            logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=margin")
             return False, 0, f"拒绝(熔断): 保证金{self.current_margin_usage*100:.1f}% > 60%"
 
         # --- 鲨鱼引擎专属校验 ---
-        if request['engine'] == 'SHARK':
+        if request.engine == 'SHARK':
             if self.shark_floating_loss > budget:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=bankrupt")
                 return False, 0, f"拒绝(破产): 已亏损{self.shark_floating_loss:.1f}U > 总预算{budget:.1f}U"
 
             risk_limit = budget * self.single_loss_limit_ratio
-            if request['estimated_risk'] > risk_limit:
-                return False, 0, f"拒绝(风控): 单次风险{request['estimated_risk']:.1f}U 超过预算40%({risk_limit:.1f}U)"
+            if request.estimated_risk > risk_limit:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=single_risk")
+                return False, 0, f"拒绝(风控): 单次风险{request.estimated_risk:.1f}U 超过预算40%({risk_limit:.1f}U)"
 
-            if request['action'] in ['ADD_L2', 'ADD_L3']:
+            if request.action in ['ADD_L2', 'ADD_L3']:
                 if self.realized_profit <= 0:
-                    return False, 0, f"拒绝(规则): {request['action']} 需要趋势引擎有已实现利润"
+                    logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=profit_required")
+                    return False, 0, f"拒绝(规则): {request.action} 需要趋势引擎有已实现利润"
 
-            if request['action'] == 'ADD_L3':
+            if request.action == 'ADD_L3':
                 if self.realized_profit < 20:
+                    logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=profit_required")
                     return False, 0, f"拒绝(规则): 鲨鱼L3需要实盈>20U (当前{self.realized_profit:.1f}U)"
 
         # --- 趋势引擎专属校验（新增：生产级必备） ---
-        if request['engine'] == 'TREND':
+        if request.engine == 'TREND':
             # 趋势预算：初始资金*70%（trend_allocation）
             trend_budget = self.initial_capital * self.trend_allocation
             risk_limit = trend_budget * self.single_loss_limit_ratio
 
             # 单次风险校验
-            if request['estimated_risk'] > risk_limit:
-                return False, 0, f"拒绝(风控): 趋势单次风险{request['estimated_risk']:.1f}U 超过预算40%({risk_limit:.1f}U)"
+            if request.estimated_risk > risk_limit:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=single_risk")
+                return False, 0, f"拒绝(风控): 趋势单次风险{request.estimated_risk:.1f}U 超过预算40%({risk_limit:.1f}U)"
 
             # L2/L3加仓校验（趋势自身实盈支撑）
-            if request['action'] in ['ADD_L2', 'ADD_L3']:
+            if request.action in ['ADD_L2', 'ADD_L3']:
                 if self.realized_profit < 10: # 趋势加仓要求实盈≥10U，低于鲨鱼
-                    return False, 0, f"拒绝(规则): {request['action']} 需要趋势实盈≥10U (当前{self.realized_profit:.1f}U)"
+                    logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=profit_required")
+                    return False, 0, f"拒绝(规则): {request.action} 需要趋势实盈≥10U (当前{self.realized_profit:.1f}U)"
 
         # 杠杆核准（所有引擎共享）
         final_lev, reason = self._calculate_safe_leverage(
-            request['suggested_leverage'], 
-            request['volatility_ratio']
+            request.suggested_leverage,
+            request.volatility_ratio,
         )
+        logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=approve reason={reason}")
         return True, final_lev, f"批准 | {reason}"
 
     # 新增：趋势预算获取方法（生产级必备）
@@ -377,14 +390,17 @@ class RiskManager:
 
         # 1. 从数据底座获取权威快照
         risk_snap = self.account_state.get_risk_snapshot()
+        if not risk_snap:
+            logger.warning("⚠️ 风控快照为空，跳过更新。")
+            return
         
         # 2. 调用原有的内部更新逻辑
         # 注意：这里将快照数据映射到原方法的参数上
         self.update_snapshot(
-            wallet_balance=risk_snap['wallet_balance'],
-            trend_float=risk_snap['trend_float'],
-            shark_float=risk_snap['shark_float'],
-            margin_usage=risk_snap['margin_usage']
+            wallet_balance=risk_snap.wallet_balance,
+            trend_float=risk_snap.trend_float,
+            shark_float=risk_snap.shark_float,
+            margin_usage=risk_snap.margin_usage,
         )
         logger.debug(f"🔄 风控状态已通过AccountState更新。")
 
@@ -405,7 +421,7 @@ class AdversarialTester:
         self.total_tests = 0
         self.passed_tests = 0
 
-    def run_case(self, name, setup_func, request, expected_result, expected_lev=None, expected_msg_part=None):
+    def run_case(self, name, setup_func, request: RiskRequest, expected_result, expected_lev=None, expected_msg_part=None):
         self.total_tests += 1
         print(f"TEST {self.total_tests}: {name}...", end=" ")
         setup_func(self.rm)
@@ -437,24 +453,24 @@ class AdversarialTester:
         # 模拟生产环境的干扰：即使本地有 240U 的旧文件，测试也应该不受影响
         # (在 __init__ 中已通过 state_file 参数隔离)
 
-        self.run_case("基准测试: 正常开仓L1", lambda rm: rm.update_snapshot(200,0,0,0.1), 
-                      {'engine':'SHARK','action':'OPEN_L1','suggested_leverage':2,'volatility_ratio':1.0,'estimated_risk':1.0}, 
+        self.run_case("基准测试: 正常开仓L1", lambda rm: rm.update_snapshot(200,0,0,0.1),
+                      RiskRequest(engine="SHARK", action="OPEN_L1", suggested_leverage=2, volatility_ratio=1.0, estimated_risk=1.0),
                       True, 2)
         
         self.run_case("熔断测试: 保证金61% (超限)", lambda rm: rm.update_snapshot(200,0,0,0.61),
-                      {'engine':'SHARK','action':'OPEN_L1','suggested_leverage':2,'volatility_ratio':1.0,'estimated_risk':1.0},
+                      RiskRequest(engine="SHARK", action="OPEN_L1", suggested_leverage=2, volatility_ratio=1.0, estimated_risk=1.0),
                       False, 0, "保证金")
 
         self.run_case("熔断测试: 权益150U (低于160U)", lambda rm: rm.update_snapshot(150,0,0.0,0.1),
-                      {'engine':'SHARK','action':'OPEN_L1','suggested_leverage':2,'volatility_ratio':1.0,'estimated_risk':1.0},
+                      RiskRequest(engine="SHARK", action="OPEN_L1", suggested_leverage=2, volatility_ratio=1.0, estimated_risk=1.0),
                       False, 0, "有效资金")
 
         self.run_case("杠杆调节: 波动率1.8 (高)", lambda rm: rm.update_snapshot(210,10,0,0.2),
-                      {'engine':'SHARK','action':'OPEN_L1','suggested_leverage':5,'volatility_ratio':1.8,'estimated_risk':1.0},
+                      RiskRequest(engine="SHARK", action="OPEN_L1", suggested_leverage=5, volatility_ratio=1.8, estimated_risk=1.0),
                       True, 4, "强制降档")
 
         self.run_case("规则拦截: 无实盈申请L2", lambda rm: rm.update_snapshot(200,50,0,0.2),
-                      {'engine':'SHARK','action':'ADD_L2','suggested_leverage':3,'volatility_ratio':1.0,'estimated_risk':5.0},
+                      RiskRequest(engine="SHARK", action="ADD_L2", suggested_leverage=3, volatility_ratio=1.0, estimated_risk=5.0),
                       False, 0, "需要趋势引擎有已实现利润")
 
         self.run_case("规则拦截: 实盈10U申请L3", lambda rm: rm.update_snapshot(210,50,0,0.2),
@@ -625,10 +641,13 @@ class MockStrategy:
         
         # 模拟：如果没仓位且价格>100，尝试开空
         if self.mock_exchange.short_position_size == 0 and price > 100:
-            request = {
-                'engine': 'SHARK', 'action': 'OPEN_L1', 'suggested_leverage': 5,
-                'volatility_ratio': 1.0, 'estimated_risk': 5.0
-            }
+            request = RiskRequest(
+                engine="SHARK",
+                action="OPEN_L1",
+                suggested_leverage=5,
+                volatility_ratio=1.0,
+                estimated_risk=5.0,
+            )
             approved, lev, msg = self.risk_manager.approve_action(request)
             if approved:
                 self.mock_exchange.place_order('sell', 10, requested_leverage=lev)

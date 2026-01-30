@@ -1,6 +1,7 @@
 # debug_strategy.py
 import asyncio
 import time
+from contracts import MarketData, StrategyContext
 from market_data_hub import MarketDataHub
 from data_synchronizer import DataSynchronizer
 from account_state import AccountState
@@ -26,29 +27,43 @@ async def main():
     risk_manager.update_from_account_state()
     
     # 4. 模拟一个市场数据（替换为从你的hub获取的真实数据）
-    market_data = {
-        'price': 50000,
-        'ema20': 49000,
-        'atr': 500,
-        'rsi': 65,  # 故意设为低于70
-        'vol_ratio': 1.0
-    }
+    market_data = MarketData(
+        price=50000,
+        ema20=49000,
+        atr=500,
+        rsi=65,  # 故意设为低于70
+        vol_ratio=1.0,
+        ts=time.time(),
+    )
     
     # 5. 调用策略引擎，观察输出
     snapshot = account_state.get_strategy_snapshot('trend')
-    test_data = {**market_data, **snapshot}
-    
-    intent = trend_engine.on_tick(test_data)
+    test_context = StrategyContext(
+        market_data=market_data,
+        account_snapshot=snapshot,
+        system_mode="NORMAL",
+        risk_regime="NORMAL",
+        state_confidence=None,
+    )
+
+    intent = trend_engine.on_tick(test_context)
     if intent:
         print("⚠️ 策略产生了意图:", intent)
     else:
         print("✅ 策略未产生意图 (符合预期，因为RSI=65<70)")
     
     # 6. 测试一个应该触发的条件
-    test_data['rsi'] = 75
-    intent2 = trend_engine.on_tick(test_data)
+    test_context.market_data = MarketData(
+        price=market_data.price,
+        ema20=market_data.ema20,
+        atr=market_data.atr,
+        rsi=75,
+        vol_ratio=market_data.vol_ratio,
+        ts=time.time(),
+    )
+    intent2 = trend_engine.on_tick(test_context)
     if intent2:
-        print("✅ 策略在RSI=75时正确产生意图:", intent2.get('action'))
+        print("✅ 策略在RSI=75时正确产生意图:", intent2.action)
     else:
         print("❌ 策略在RSI=75时未触发，需要检查条件")
 

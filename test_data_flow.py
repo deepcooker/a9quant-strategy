@@ -4,6 +4,13 @@ import sys
 import os
 import time
 
+import pytest
+
+try:
+    import ccxt  # noqa: F401
+except Exception:
+    pytest.skip("ccxt not available", allow_module_level=True)
+
 # 参考 martin.py，解决项目内模块导入问题
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -77,7 +84,7 @@ async def main():
     risk_snapshot = acc_state.get_risk_snapshot()
     if risk_snapshot:
         print("   ✅ 风控快照生成成功，包含以下关键字段:")
-        for key, value in risk_snapshot.items():
+        for key, value in risk_snapshot.__dict__.items():
             if key != 'timestamp':
                 print(f"      - {key}: {value}")
     else:
