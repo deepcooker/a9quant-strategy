@@ -204,7 +204,7 @@ class RiskManager:
         prev = self.system_mode
 
         # 1) 进入 FROZEN
-        if state_conf < 0.4 or getattr(self.account_state.data_sync, "rest_fail_count", 0) >= 5:
+        if state_conf < 0.4 or getattr(self.account_state.data_sync, "rest_fail_count", 0) >= 5 or getattr(self.account_state.data_sync, "ws_disconnect_count", 0) >= 5:
             self.system_mode = SystemMode.FROZEN
             self.mode_reason = f"frozen: state_conf={state_conf:.2f} rest_fail={getattr(self.account_state.data_sync, 'rest_fail_count', 0)}"
 

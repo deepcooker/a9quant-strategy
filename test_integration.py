@@ -212,3 +212,61 @@ def test_oms_idempotency_prevents_duplicate_orders():
 
     assert first == second
     assert len(oms.orders) == 1
+
+
+def test_reconnect_triggers_resubscribe_and_calibration():
+    import sys
+    import types
+
+    fake_websockets = types.SimpleNamespace(connect=lambda *args, **kwargs: None)
+    fake_proxy = types.SimpleNamespace(
+        Proxy=types.SimpleNamespace(from_url=lambda *_args, **_kwargs: None),
+        proxy_connect=lambda *args, **kwargs: None,
+    )
+    sys.modules.setdefault("websockets", fake_websockets)
+    sys.modules.setdefault("websockets_proxy", fake_proxy)
+
+    from bitget_ws_bridge import BitgetWSBridge
+    class DummyDataSync:
+        def __init__(self):
+            self.calibrations = 0
+            self.ws_disconnect_count = 0
+
+        async def calibrate_positions(self):
+            self.calibrations += 1
+            return True
+
+        async def calibrate_balance(self):
+            self.calibrations += 1
+            return True
+
+        async def calibrate_orders(self):
+            self.calibrations += 1
+            return True
+
+        def mark_ws_public_disconnect(self):
+            self.ws_disconnect_count += 1
+
+        def mark_ws_private_disconnect(self):
+            self.ws_disconnect_count += 1
+
+    class DummyMarketHub:
+        def update_ticker(self, *_args, **_kwargs):
+            return None
+
+        def update_candles(self, *_args, **_kwargs):
+            return None
+
+    data_sync = DummyDataSync()
+    bridge = BitgetWSBridge(
+        api_key="k",
+        secret="s",
+        passphrase="p",
+        market_hub=DummyMarketHub(),
+        data_sync=data_sync,
+        oms=None,
+    )
+
+    asyncio.run(bridge.on_private_reconnect())
+    assert bridge.private_reconnect_count == 1
+    assert data_sync.calibrations == 3

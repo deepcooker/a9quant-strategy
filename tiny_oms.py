@@ -125,6 +125,14 @@ class TinyOMS:
         if self.data_sync:
             self.data_sync.mark_order_sent()
 
+        if not self.dry_run and self.data_sync and not self.data_sync.is_private_ready():
+            rec.status = OrderStatus.FAILED
+            rec.last_update = time.time()
+            if self.data_sync:
+                self.data_sync.report_execution_event(False, f"order_channel_unhealthy clientOid={client_oid}")
+            logger.warning(f"[OMS] event=oms trace_id={trace_id} symbol={self.symbol} status=FAILED reason=private_channel_unhealthy")
+            return client_oid
+
         if self.dry_run:
             self.on_order_update(client_oid, "ack")
             self.on_order_update(client_oid, "filled")

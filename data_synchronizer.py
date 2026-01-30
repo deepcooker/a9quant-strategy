@@ -34,6 +34,7 @@ class DataSynchronizer:
         # ===== 现金流治理：连接健康与一致性 ===== v1.2
         self.ws_public_ok = False
         self.ws_private_ok = False
+        self.ws_disconnect_count = 0
 
         self.last_ws_public_ts = 0.0
         self.last_ws_position_ts = 0.0
@@ -114,6 +115,16 @@ class DataSynchronizer:
     def mark_ws_private_heartbeat(self):
         with self._lock:
             self.ws_private_ok = True
+
+    def mark_ws_public_disconnect(self):
+        with self._lock:
+            self.ws_public_ok = False
+            self.ws_disconnect_count += 1
+
+    def mark_ws_private_disconnect(self):
+        with self._lock:
+            self.ws_private_ok = False
+            self.ws_disconnect_count += 1
 
     def mark_ws_order_update(self):
         with self._lock:
@@ -255,6 +266,20 @@ class DataSynchronizer:
             if score > 1.0:
                 score = 1.0
             return score
+
+    def is_private_ready(self, max_age_s: float = 30.0) -> bool:
+        """私有回报通道是否健康（订单/账户/持仓回报）。"""
+        now = time.time()
+        with self._lock:
+            if not self.ws_private_ok:
+                return False
+            if self.last_ws_order_ts and now - self.last_ws_order_ts > max_age_s:
+                return False
+            if self.last_ws_account_ts and now - self.last_ws_account_ts > max_age_s:
+                return False
+            if self.last_ws_position_ts and now - self.last_ws_position_ts > max_age_s:
+                return False
+            return True
 
     # ===== v1.4 新增上报执行闭环事件方法 =====
     def report_execution_event(self, ok: bool, reason: str):
