@@ -14,6 +14,7 @@ class DummyTrader:
 async def main():
     print("🧪 Dry-run 全链路测试开始")
     steps: list[str] = []
+    trace_id = "dry-run-trace"
     class DummyDataSync:
         rest_fail_count = 0
 
@@ -43,6 +44,7 @@ async def main():
         system_mode="NORMAL",
         risk_regime="NORMAL",
         state_confidence=None,
+        trace_id=trace_id,
     )
 
     intent = trend_engine.on_tick(context)
@@ -62,6 +64,7 @@ async def main():
     assert order is not None, "OMS 未记录订单"
     assert order.status == "DRY_RUN", f"OMS 状态异常: {order.status}"
     assert steps == ["intent", "approved", "oms"]
+    assert order.trace_id == trace_id
     print(f"✅ Dry-run 下单完成: {client_oid}")
 
 

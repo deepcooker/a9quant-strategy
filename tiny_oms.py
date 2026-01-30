@@ -7,8 +7,6 @@ from typing import Dict, Any, Optional, Tuple
 
 from contracts import TradeIntent
 
-from contracts import TradeIntent
-
 logger = logging.getLogger("TinyOMS")
 
 def resolve_trade_mode(live_trading_config: bool, env_allow: Optional[str]) -> Tuple[bool, str]:
@@ -35,6 +33,7 @@ class OrderRecord:
     exchange_order_id: Optional[str] = None
     last_update: float = 0.0
     raw: Optional[Dict[str, Any]] = None
+    trace_id: Optional[str] = None
 
 class TinyOMS:
     def __init__(self, trader, symbol: str, data_sync=None, product_type: str = "USDT-FUTURES", dry_run: bool = True):  # v1.3
@@ -55,6 +54,7 @@ class TinyOMS:
         pos_side = intent.pos_side       # long/short
         size = float(intent.size)
         margin_mode = intent.margin_mode or "crossed"
+        trace_id = intent.trace_id or intent.risk_request.trace_id
 
         # open long=>buy; open short=>sell; close long=>sell; close short=>buy
         if trade_side == "open":
@@ -77,6 +77,7 @@ class TinyOMS:
             size=size,
             status="SENT",
             last_update=time.time(),
+            trace_id=trace_id,
         )
         self.orders[client_oid] = rec
 
@@ -91,7 +92,7 @@ class TinyOMS:
                 self.data_sync.pending_order_flag = False
                 self.data_sync.pending_order_since_ts = 0.0
                 self.data_sync.report_execution_event(True, f"dry_run_ack clientOid={client_oid}")
-            logger.info(f"[OMS] Dry-run simulated order: {rec}")
+            logger.info(f"[OMS] event=oms trace_id={trace_id} symbol={self.symbol} status=DRY_RUN")
             return client_oid
 
         # Bitget：优先用原生端点（和你 martin 思路一致，更稳）
@@ -110,7 +111,7 @@ class TinyOMS:
                 "posSide": pos_side,
                 "clientOid": client_oid,
             }
-            logger.info(f"[OMS] Bitget native place: {req}")
+            logger.info(f"[OMS] event=oms trace_id={trace_id} symbol={self.symbol} status=SEND")
 
             try:  # v1.3
                 resp = await asyncio.to_thread(

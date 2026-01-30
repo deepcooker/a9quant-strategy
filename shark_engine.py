@@ -134,6 +134,7 @@ class SharkEngine:
 
     def on_tick(self, context: StrategyContext) -> TradeIntent | None:
         data = context.market_data
+        trace_id = context.trace_id
         price = data.price
         ts = data.ts or time.time()
         vol = data.vol_ratio if data.vol_ratio is not None else 1.0
@@ -145,7 +146,7 @@ class SharkEngine:
         # 2. 状态机 - v1.0 改造：调用函数接收intent并返回
         if self.state == SharkState.SLEEP:
             if data.rsi is not None and data.rsi > 70:
-                intent = self._try_enter_l1(price, ts, vol)  # v1.0
+                intent = self._try_enter_l1(price, ts, vol, trace_id)  # v1.0
                 if intent: return intent  # v1.0
                 
         elif self.state == SharkState.L1_EXIST:
@@ -155,14 +156,14 @@ class SharkEngine:
                 if intent: return intent  # v1.0
             # 浮亏加仓 (L2)
             elif self.total_size > 0 and (floating_pnl/self.total_size) < -0.02:
-                intent = self._try_enter_l2(price, vol)  # v1.0
+                intent = self._try_enter_l2(price, vol, trace_id)  # v1.0
                 if intent: return intent  # v1.0
 
         elif self.state == SharkState.L2_HUNT:
             self.l1_l2_max_loss = max(self.l1_l2_max_loss, abs(floating_pnl))
             # 极端信号 (L3)
             if data.rsi is not None and data.rsi > 85:
-                intent = self._try_enter_l3(price, vol)  # v1.0
+                intent = self._try_enter_l3(price, vol, trace_id)  # v1.0
                 if intent: return intent  # v1.0
 
         elif self.state == SharkState.L3_SNIPE:
@@ -174,7 +175,7 @@ class SharkEngine:
                 intent = self._close_position(price, "🛡️ [L3止损] 狙击失败")  # v1.0
                 if intent: return intent  # v1.0
 
-    def _try_enter_l1(self, price, ts, vol) -> TradeIntent:
+    def _try_enter_l1(self, price, ts, vol, trace_id) -> TradeIntent:
         # v1.0 改造：不再执行交易，返回开仓intent（做空，pos_side=short）
         budget = self.rm.get_shark_budget() * 0.1
         req = RiskRequest(
@@ -183,6 +184,7 @@ class SharkEngine:
             suggested_leverage=2,
             volatility_ratio=vol,
             estimated_risk=budget,
+            trace_id=trace_id,
         )
 
         # 近似计算size：(保证金*杠杆)/价格
@@ -200,9 +202,10 @@ class SharkEngine:
             size=size,
             margin_mode="crossed",
             risk_request=req,
+            trace_id=trace_id,
         )
 
-    def _try_enter_l2(self, price, vol) -> TradeIntent | None:
+    def _try_enter_l2(self, price, vol, trace_id) -> TradeIntent | None:
         """
         v1.0 改造：返回加仓intent，保留保证金校验逻辑
         """
@@ -219,6 +222,7 @@ class SharkEngine:
             suggested_leverage=3,
             volatility_ratio=vol,
             estimated_risk=budget,
+            trace_id=trace_id,
         )
 
         # 近似计算size
@@ -232,9 +236,10 @@ class SharkEngine:
             size=size,
             margin_mode="crossed",
             risk_request=req,
+            trace_id=trace_id,
         )
 
-    def _try_enter_l3(self, price, vol) -> TradeIntent | None:
+    def _try_enter_l3(self, price, vol, trace_id) -> TradeIntent | None:
         # v1.0 改造：返回L3加仓intent
         trend_profit = self.rm.realized_profit
         if trend_profit <= 0: return None
@@ -247,6 +252,7 @@ class SharkEngine:
             suggested_leverage=10,
             volatility_ratio=vol,
             estimated_risk=risk_budget,
+            trace_id=trace_id,
         )
 
         # 近似计算size
@@ -260,6 +266,7 @@ class SharkEngine:
             size=size,
             margin_mode="crossed",
             risk_request=req,
+            trace_id=trace_id,
         )
 
 # ==========================================
@@ -288,6 +295,7 @@ if __name__ == "__main__":
             system_mode="NORMAL",
             risk_regime="NORMAL",
             state_confidence=None,
+            trace_id="test-trace",
         )
     
     # 通用清理函数

@@ -10,6 +10,7 @@ class RiskRequest:
     suggested_leverage: float
     volatility_ratio: float
     estimated_risk: float
+    trace_id: Optional[str] = None
 
 
 @dataclass
@@ -23,6 +24,7 @@ class TradeIntent:
     risk_request: RiskRequest
     client_oid: Optional[str] = None
     approved_leverage: Optional[float] = None
+    trace_id: Optional[str] = None
 
 
 @dataclass
@@ -58,6 +60,7 @@ class StrategyContext:
     system_mode: str
     risk_regime: str
     state_confidence: Optional[float]
+    trace_id: Optional[str] = None
 
 
 @dataclass

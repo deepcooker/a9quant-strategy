@@ -57,6 +57,7 @@ class TrendEngine:
         """
         
         data = context.market_data
+        trace_id = context.trace_id
 
         # 临时调试日志
         print(f"[TrendEngine] state={self.state}, price={data.price}, rsi={data.rsi}")
@@ -168,6 +169,7 @@ class TrendEngine:
             suggested_leverage=3,
             volatility_ratio=data.vol_ratio,
             estimated_risk=req_capital * 0.1,
+            trace_id=trace_id,
         )
 
         # v1.0 不 approve，不 execute，只返回意图
@@ -183,6 +185,7 @@ class TrendEngine:
             size=size,
             margin_mode="crossed",
             risk_request=risk_request,
+            trace_id=trace_id,
         )
 
     def _try_open_l2(self, data):
@@ -198,6 +201,7 @@ class TrendEngine:
             suggested_leverage=5,
             volatility_ratio=data.vol_ratio,
             estimated_risk=req_capital * 0.05,
+            trace_id=trace_id,
         )
 
         # v1.0 不 approve，不 execute，只返回意图
@@ -213,6 +217,7 @@ class TrendEngine:
             size=size,
             margin_mode="crossed",
             risk_request=risk_request,
+            trace_id=trace_id,
         )
 
     def _try_open_l3(self, data):
@@ -232,6 +237,7 @@ class TrendEngine:
             suggested_leverage=10,
             volatility_ratio=data.vol_ratio,
             estimated_risk=profit_bet,
+            trace_id=trace_id,
         )
 
         # v1.0 不 approve，不 execute，只返回意图
@@ -247,6 +253,7 @@ class TrendEngine:
             size=size,
             margin_mode="crossed",
             risk_request=risk_request,
+            trace_id=trace_id,
         )
 
     def _execute_trade(self, price, margin, lev, new_state):
@@ -331,6 +338,7 @@ if __name__ == "__main__":
             system_mode="NORMAL",
             risk_regime="NORMAL",
             state_confidence=None,
+            trace_id="test-trace",
         )
 
     def run_scenario(name, data_feed, init_profit=0, manual_balance_override=None):

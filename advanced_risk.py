@@ -94,6 +94,7 @@ class RiskManager:
         self._last_seen_exec_seq = 0
         self.rebuild_ok_streak = 0
         self.rebuild_need_streak = 3  # 建议 3~5，你可以改成 5，更稳
+        self.last_decision_trace_id = None
 
 
     def _load_state(self):
@@ -292,15 +293,18 @@ class RiskManager:
 
     def approve_action(self, request: RiskRequest):
         # ===== 宪法闸门：系统模式先于策略 ===== v1.2
+        self.last_decision_trace_id = request.trace_id
         policy = self.evaluate_policy()
 
         action = str(request.action).upper()
 
         if policy.system_mode == SystemMode.FROZEN:
+            logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason={policy.reason}")
             return False, 0, f"拒绝(FROZEN): {policy.reason}"
 
         if policy.system_mode == SystemMode.DEFENSIVE:
             if "CLOSE" not in action and "REDUCE" not in action:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason={policy.reason}")
                 return False, 0, f"拒绝(DEFENSIVE): 只允许减仓/平仓 | {policy.reason}"
 
         if policy.system_mode == SystemMode.REBUILD:
@@ -316,26 +320,32 @@ class RiskManager:
 
         # 通用熔断检查（所有引擎共享）
         if effective_equity / self.anchor_capital < self.max_drawdown_limit:
+            logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=drawdown")
             return False, 0, f"拒绝(熔断): 有效资金{effective_equity:.1f}U < 熔断线{self.anchor_capital*self.max_drawdown_limit:.1f}U"
 
         if self.current_margin_usage > self.max_margin_limit:
+            logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=margin")
             return False, 0, f"拒绝(熔断): 保证金{self.current_margin_usage*100:.1f}% > 60%"
 
         # --- 鲨鱼引擎专属校验 ---
         if request.engine == 'SHARK':
             if self.shark_floating_loss > budget:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=bankrupt")
                 return False, 0, f"拒绝(破产): 已亏损{self.shark_floating_loss:.1f}U > 总预算{budget:.1f}U"
 
             risk_limit = budget * self.single_loss_limit_ratio
             if request.estimated_risk > risk_limit:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=single_risk")
                 return False, 0, f"拒绝(风控): 单次风险{request.estimated_risk:.1f}U 超过预算40%({risk_limit:.1f}U)"
 
             if request.action in ['ADD_L2', 'ADD_L3']:
                 if self.realized_profit <= 0:
+                    logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=profit_required")
                     return False, 0, f"拒绝(规则): {request.action} 需要趋势引擎有已实现利润"
 
             if request.action == 'ADD_L3':
                 if self.realized_profit < 20:
+                    logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=profit_required")
                     return False, 0, f"拒绝(规则): 鲨鱼L3需要实盈>20U (当前{self.realized_profit:.1f}U)"
 
         # --- 趋势引擎专属校验（新增：生产级必备） ---
@@ -346,11 +356,13 @@ class RiskManager:
 
             # 单次风险校验
             if request.estimated_risk > risk_limit:
+                logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=single_risk")
                 return False, 0, f"拒绝(风控): 趋势单次风险{request.estimated_risk:.1f}U 超过预算40%({risk_limit:.1f}U)"
 
             # L2/L3加仓校验（趋势自身实盈支撑）
             if request.action in ['ADD_L2', 'ADD_L3']:
                 if self.realized_profit < 10: # 趋势加仓要求实盈≥10U，低于鲨鱼
+                    logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=reject reason=profit_required")
                     return False, 0, f"拒绝(规则): {request.action} 需要趋势实盈≥10U (当前{self.realized_profit:.1f}U)"
 
         # 杠杆核准（所有引擎共享）
@@ -358,6 +370,7 @@ class RiskManager:
             request.suggested_leverage,
             request.volatility_ratio,
         )
+        logger.info(f"[Risk] event=risk trace_id={request.trace_id} result=approve reason={reason}")
         return True, final_lev, f"批准 | {reason}"
 
     # 新增：趋势预算获取方法（生产级必备）

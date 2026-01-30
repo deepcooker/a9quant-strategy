@@ -80,12 +80,14 @@ class DummyTrader:
 
 
 def build_intent():
+    trace_id = "trace-test"
     risk_request = RiskRequest(
         engine="SHARK",
         action="OPEN_L1",
         suggested_leverage=2,
         volatility_ratio=1.0,
         estimated_risk=1.0,
+        trace_id=trace_id,
     )
     return TradeIntent(
         engine="SHARK",
@@ -95,6 +97,7 @@ def build_intent():
         size=0.01,
         margin_mode="crossed",
         risk_request=risk_request,
+        trace_id=trace_id,
     )
 
 
@@ -123,3 +126,47 @@ def test_live_gate_requires_env_and_config(monkeypatch):
     oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=dry_run)
     asyncio.run(oms.place_intent(intent))
     assert exchange.called is True
+
+
+def test_trace_id_propagates_to_risk_and_oms():
+    class DummyDataSync:
+        rest_fail_count = 0
+
+    class DummyAccountState:
+        data_sync = DummyDataSync()
+        state_confidence = 0.95
+
+        def get_strategy_snapshot(self, engine_name: str):
+            return StrategySnapshot(account=None, positions={}, position_uncertain=False)
+
+    rm = RiskManager(initial_capital=200, account_state=DummyAccountState())
+    rm.update_snapshot(wallet_balance=200, trend_float=0, shark_float=0, margin_usage=0.1)
+
+    trace_id = "trace-prop"
+    risk_request = RiskRequest(
+        engine="SHARK",
+        action="OPEN_L1",
+        suggested_leverage=2,
+        volatility_ratio=1.0,
+        estimated_risk=1.0,
+        trace_id=trace_id,
+    )
+    intent = TradeIntent(
+        engine="SHARK",
+        action="OPEN_L1",
+        trade_side="open",
+        pos_side="short",
+        size=0.01,
+        margin_mode="crossed",
+        risk_request=risk_request,
+        trace_id=trace_id,
+    )
+
+    ok, _, _ = rm.approve_action(intent.risk_request)
+    assert ok is True
+    assert rm.last_decision_trace_id == trace_id
+
+    exchange = DummyExchange()
+    oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=True)
+    client_oid = asyncio.run(oms.place_intent(intent))
+    assert oms.orders[client_oid].trace_id == trace_id

@@ -104,9 +104,11 @@ class MainController:
 
         while self.running:
             try:
+                trace_id = f"{int(time.time()*1000)}"
                 # 1) 更新事实账本 v1.3
                 self.account_state.update()
                 self.risk_manager.update_from_account_state()
+                logger.info(f"[State] event=state trace_id={trace_id} symbol={self.data_sync.symbol} ts={time.time()}")
 
                 # 2) 中央银行输出 policy（现金流主权）v1.3
                 policy = self.risk_manager.evaluate_policy()
@@ -127,6 +129,7 @@ class MainController:
                 if not market_data:
                     await asyncio.sleep(0.5)
                     continue
+                logger.info(f"[Market] event=market trace_id={trace_id} symbol={self.data_sync.symbol} ts={time.time()}")
 
                 # 6) 只在策略 ENABLED 时才调用 on_tick v1.3
                 trend_intent = None
@@ -139,7 +142,10 @@ class MainController:
                         system_mode=policy.system_mode.value,
                         risk_regime=policy.risk_regime.value,
                         state_confidence=getattr(self.account_state, "state_confidence", None),
+                        trace_id=trace_id,
                     ))
+                    if trend_intent:
+                        logger.info(f"[Signal] event=intent trace_id={trace_id} symbol={self.data_sync.symbol} module=trend action={trend_intent.action}")
 
                 if self.strategy_registry.get("shark") == "ENABLED":
                     shark_intent = self.shark_engine.on_tick(StrategyContext(
@@ -148,7 +154,10 @@ class MainController:
                         system_mode=policy.system_mode.value,
                         risk_regime=policy.risk_regime.value,
                         state_confidence=getattr(self.account_state, "state_confidence", None),
+                        trace_id=trace_id,
                     ))
+                    if shark_intent:
+                        logger.info(f"[Signal] event=intent trace_id={trace_id} symbol={self.data_sync.symbol} module=shark action={shark_intent.action}")
 
                 # 7) DEFENSIVE：只允许 CLOSE/REDUCE intent 进入执行层 v1.3
                 if policy.system_mode.value == "DEFENSIVE":
