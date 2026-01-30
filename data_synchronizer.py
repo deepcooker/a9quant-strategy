@@ -48,6 +48,28 @@ class DataSynchronizer:
         self.position_uncertain = False
         self.last_rest_sync = 0.0
         self.sync_interval = 60.0  # REST强制同步间隔(秒)
+        
+        # ===== 现金流治理：连接健康与一致性 ===== v1.2
+        self.ws_public_ok = False
+        self.ws_private_ok = False
+
+        self.last_ws_public_ts = 0.0
+        self.last_ws_position_ts = 0.0
+        self.last_ws_account_ts = 0.0
+        self.last_ws_order_ts = 0.0
+
+        self.last_rest_ok_ts = 0.0
+        self.rest_fail_count = 0
+
+        # 用于判断“订单提交后迟迟没回报”
+        self.pending_order_flag = False
+        self.pending_order_since_ts = 0.0
+
+        # ===== REBUILD 执行闭环证据（只看事实）===== v1.4
+        self.exec_event_seq = 0
+        self.last_exec_event_ts = 0.0
+        self.last_exec_ok = None          # True/False/None
+        self.last_exec_reason = ""
 
     def update_from_ws_position(self, data: Dict[str, Any]):
         """
@@ -79,6 +101,10 @@ class DataSynchronizer:
             # 收到WS推送，解除仓位不确定状态
             self.position_uncertain = False
             logger.debug(f"WS持仓更新: long={self._raw_positions.get('long', RawPosition)}")
+            
+            # v1.2
+            self.ws_private_ok = True
+            self.last_ws_position_ts = time.time()
 
     def update_from_ws_account(self, data: Dict[str, Any]):
         """处理WebSocket账户推送"""
@@ -93,6 +119,33 @@ class DataSynchronizer:
                     margin_ratio=float(data.get('crossedRiskRate', 0)),
                     timestamp=time.time()
                 )
+                # v1.2
+                self.ws_private_ok = True
+                self.last_ws_account_ts = time.time()
+
+    # v1.2 新增WS桥接层打点方法
+    def mark_ws_public_heartbeat(self):
+        with self._lock:
+            self.ws_public_ok = True
+            self.last_ws_public_ts = time.time()
+
+    def mark_ws_private_heartbeat(self):
+        with self._lock:
+            self.ws_private_ok = True
+
+    def mark_ws_order_update(self):
+        with self._lock:
+            self.ws_private_ok = True
+            self.last_ws_order_ts = time.time()
+            # 一旦有订单推送，说明“pending”解除（至少回报链路是通的）
+            self.pending_order_flag = False
+            self.pending_order_since_ts = 0.0
+
+    def mark_order_sent(self):
+        """OMS 下单成功发送后调用，用于检测“无回报”风险"""
+        with self._lock:
+            self.pending_order_flag = True
+            self.pending_order_since_ts = time.time()
 
     async def force_rest_sync(self):
         """
@@ -140,11 +193,17 @@ class DataSynchronizer:
                 )
                 self.position_uncertain = False
                 self.last_rest_sync = time.time()
+                # v1.2
+                self.last_rest_ok_ts = time.time()
+                self.rest_fail_count = 0
                 
             logger.info("✅ REST同步完成")
             return True
             
         except Exception as e:
+            # v1.2
+            with self._lock:
+                self.rest_fail_count += 1
             logger.error(f"❌ REST同步失败: {e}")
             return False
 
@@ -157,3 +216,54 @@ class DataSynchronizer:
                 'position_uncertain': self.position_uncertain,
                 'timestamp': time.time()
             }
+    
+    # v1.2 新增一致性评分方法
+    def get_consistency_score(self) -> float:
+        """
+        返回 0~1 的一致性/可信度分数。
+        这是现金流状态机的唯一输入之一（硬规则，不要过度“智能”）。
+        """
+        now = time.time()
+        with self._lock:
+            score = 1.0
+
+            # 1) 私有 WS 不健康：直接重伤
+            if not self.ws_private_ok or (self.last_ws_position_ts and now - self.last_ws_position_ts > 30):
+                score = min(score, 0.60)
+
+            # 2) 最近 REST 没成功：再降
+            if self.last_rest_ok_ts == 0 or (now - self.last_rest_ok_ts > 60):
+                score = min(score, 0.50)
+
+            # 3) 仓位不确定：强降（这是你已有的核心开关）
+            if self.position_uncertain:
+                score = min(score, 0.40)
+
+            # 4) 连续 REST 失败：进一步降
+            if self.rest_fail_count >= 2:
+                score = min(score, 0.35)
+            if self.rest_fail_count >= 5:
+                score = min(score, 0.20)
+
+            # 5) 有“已发单但无回报”风险：直接打到很低
+            if self.pending_order_flag:
+                if now - self.pending_order_since_ts > 10:
+                    score = min(score, 0.30)
+                if now - self.pending_order_since_ts > 30:
+                    score = min(score, 0.20)
+
+            # clamp
+            if score < 0.0:
+                score = 0.0
+            if score > 1.0:
+                score = 1.0
+            return score
+
+    # ===== v1.4 新增上报执行闭环事件方法 =====
+    def report_execution_event(self, ok: bool, reason: str):
+        """OMS / MainController 用来上报一次执行闭环结果（成功/失败）。"""
+        with self._lock:
+            self.exec_event_seq += 1
+            self.last_exec_event_ts = time.time()
+            self.last_exec_ok = bool(ok)
+            self.last_exec_reason = str(reason)[:200]

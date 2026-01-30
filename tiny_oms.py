@@ -22,9 +22,10 @@ class OrderRecord:
     raw: Optional[Dict[str, Any]] = None
 
 class TinyOMS:
-    def __init__(self, trader, symbol: str, product_type: str = "USDT-FUTURES"):
+    def __init__(self, trader, symbol: str, data_sync=None, product_type: str = "USDT-FUTURES"):  # v1.3
         self.trader = trader
         self.symbol = symbol
+        self.data_sync = data_sync  # v1.3
         self.product_type = product_type
         self.orders: Dict[str, OrderRecord] = {}
 
@@ -63,6 +64,10 @@ class TinyOMS:
         )
         self.orders[client_oid] = rec
 
+        # 下单前：标记 pending（无回报风险开始计时）v1.3
+        if self.data_sync:
+            self.data_sync.mark_order_sent()
+
         # Bitget：优先用原生端点（和你 martin 思路一致，更稳）
         if self.trader.exchange_id == "bitget":
             clean_symbol = self.symbol.replace("/", "").split(":")[0]
@@ -81,51 +86,79 @@ class TinyOMS:
             }
             logger.info(f"[OMS] Bitget native place: {req}")
 
-            resp = await asyncio.to_thread(
-                self.trader.exchange.private_mix_post_v2_mix_order_place_order,
-                req
-            )
-            rec.raw = resp
-            rec.last_update = time.time()
+            try:  # v1.3
+                resp = await asyncio.to_thread(
+                    self.trader.exchange.private_mix_post_v2_mix_order_place_order,
+                    req
+                )
+                rec.raw = resp
+                rec.last_update = time.time()
 
-            if str(resp.get("code")) == "00000":
-                data = resp.get("data") or {}
-                rec.exchange_order_id = data.get("orderId") or data.get("order_id")
-                rec.status = "ACK"
-            else:
-                rec.status = "REJECTED"
-                raise RuntimeError(f"Bitget place_order failed: {resp}")
-
+                if str(resp.get("code")) == "00000":
+                    data = resp.get("data") or {}
+                    rec.exchange_order_id = data.get("orderId") or data.get("order_id")
+                    rec.status = "ACK"
+                else:
+                    rec.status = "REJECTED"
+                    # v1.4 上报拒单闭环事件
+                    if self.data_sync:
+                        self.data_sync.report_execution_event(False, f"order_rejected clientOid={client_oid}")
+                    raise RuntimeError(f"Bitget place_order failed: {resp}")
+            except Exception as e:  # v1.3
+                # 失败也算“有结果”，解除pending v1.3
+                if self.data_sync:
+                    self.data_sync.pending_order_flag = False
+                    self.data_sync.pending_order_since_ts = 0.0
+                    # v1.4 上报异常闭环事件
+                    self.data_sync.report_execution_event(False, f"order_exception clientOid={client_oid} err={str(e)[:50]}")
+                logger.error(f"下单失败: {e}")
+                raise e  # 保持原有异常抛出逻辑
         else:
-            order = await asyncio.to_thread(
-                self.trader.exchange.create_market_order,
-                self.symbol, side, size, None, {}
-            )
-            rec.exchange_order_id = order.get("id")
-            rec.status = "ACK"
-            rec.raw = order
-            rec.last_update = time.time()
+            try:  # v1.3
+                order = await asyncio.to_thread(
+                    self.trader.exchange.create_market_order,
+                    self.symbol, side, size, None, {}
+                )
+                rec.exchange_order_id = order.get("id")
+                rec.status = "ACK"
+                rec.raw = order
+            except Exception as e:
+                # v1.4 上报异常闭环事件
+                if self.data_sync:
+                    self.data_sync.pending_order_flag = False
+                    self.data_sync.pending_order_since_ts = 0.0
+                    self.data_sync.report_execution_event(False, f"order_exception clientOid={client_oid} err={str(e)[:50]}")
+                raise e
 
-        return client_oid
-
-    def on_order_update(self, order_data: Dict[str, Any]):
-        # 兼容字段
-        client_oid = order_data.get("clientOid") or order_data.get("clientOrderId")
-        if not client_oid:
+    # ===== v1.4 新增订单状态更新方法（补充订单终态上报逻辑，需确保原有代码中调用此方法）=====
+    def on_order_update(self, client_oid: str, st: str):
+        """处理订单状态更新，上报执行闭环事件"""
+        if client_oid not in self.orders:
             return
-        rec = self.orders.get(client_oid)
-        if not rec:
-            return
-
-        rec.raw = order_data
-        rec.last_update = time.time()
-
-        st = (order_data.get("state") or order_data.get("status") or "").lower()
+        rec = self.orders[client_oid]
+        st = st.lower()
+        # v1.4 订单终态上报闭环结果
         if st in ("filled", "full_fill", "success"):
             rec.status = "FILLED"
+            if self.data_sync:
+                self.data_sync.report_execution_event(True, f"order_filled clientOid={client_oid}")
+
         elif st in ("canceled", "cancelled"):
             rec.status = "CANCELED"
-        elif st in ("partial_fill", "partially_filled"):
-            rec.status = "PARTIAL"
-        else:
-            rec.status = "ACK"
+            if self.data_sync:
+                self.data_sync.report_execution_event(False, f"order_canceled clientOid={client_oid}")
+
+        elif st in ("rejected", "reject", "fail"):
+            rec.status = "REJECTED"
+            if self.data_sync:
+                self.data_sync.report_execution_event(False, f"order_rejected clientOid={client_oid}")
+        rec.last_update = time.time()
+
+    # ===== v1.4 新增无回报超时检查方法 =====
+    def check_no_report_timeout(self, timeout_s: int = 30):
+        """在主循环里定期调用：发单后长时间无回报，判定为失败闭环。"""
+        if not self.data_sync:
+            return
+        now = time.time()
+        if self.data_sync.pending_order_flag and (now - self.data_sync.pending_order_since_ts > timeout_s):
+            self.data_sync.report_execution_event(False, f"order_no_report_timeout>{timeout_s}s")

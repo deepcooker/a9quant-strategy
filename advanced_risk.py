@@ -3,6 +3,9 @@ import logging
 import sys
 import json
 import os
+from dataclasses import dataclass
+from enum import Enum
+import time  # v1.2
 
 # ==========================================
 # 1. 配置顶级日志
@@ -13,6 +16,28 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("CentralBank")
+
+# ==========================================
+# v1.2 新增枚举与数据类
+# ==========================================
+class SystemMode(str, Enum):
+    NORMAL = "NORMAL"
+    DEFENSIVE = "DEFENSIVE"
+    FROZEN = "FROZEN"
+    REBUILD = "REBUILD"
+
+class RiskRegime(str, Enum):
+    NORMAL = "NORMAL"
+    EXTREME = "EXTREME"
+
+@dataclass
+class PolicyDecision:
+    system_mode: SystemMode
+    risk_regime: RiskRegime
+    allowed_actions: list
+    disable_strategies: list
+    reason: str
+    ts: float
 
 # ==========================================
 # 2. 中央风控银行核心类
@@ -57,6 +82,17 @@ class RiskManager:
         self._load_state()
         #v1.0
         self.account_state = account_state # 新增：持有AccountState实例
+        
+        # ===== 现金流治理：系统模式状态机 ===== v1.2
+        self.system_mode = SystemMode.NORMAL
+        self.risk_regime = RiskRegime.NORMAL
+        self.mode_reason = "init"
+        self.mode_since_ts = time.time()
+
+        # ========== v1.4 改动点：REBUILD 执行闭环证据驱动新增字段 ==========
+        self._last_seen_exec_seq = 0
+        self.rebuild_ok_streak = 0
+        self.rebuild_need_streak = 3  # 建议 3~5，你可以改成 5，更稳
 
 
     def _load_state(self):
@@ -130,6 +166,120 @@ class RiskManager:
         discounted_equity = net_balance + (self.trend_floating_pnl * 0.3) - self.shark_floating_loss
         return max(0.0, discounted_equity)
 
+    # v1.2 新增策略评估方法
+    def evaluate_policy(self) -> PolicyDecision:
+        """
+        现金流主权输出：决定系统模式、风险态势、允许动作、是否禁用策略。
+        """
+        now = time.time()
+
+        # 没注入 AccountState 就只能保守
+        if not self.account_state:
+            self.system_mode = SystemMode.FROZEN
+            self.risk_regime = RiskRegime.EXTREME
+            self.mode_reason = "no_account_state"
+            return PolicyDecision(self.system_mode, self.risk_regime, [], ["trend", "shark"], self.mode_reason, now)
+
+        # 读取“可信度分数”
+        # 你需要在 AccountState 里增加 state_confidence（= data_sync.get_consistency_score()）
+        state_conf = getattr(self.account_state, "state_confidence", None)
+        if state_conf is None:
+            # 没有就降级处理：用 position_uncertain 粗糙替代
+            snap = self.account_state.get_strategy_snapshot("trend") or {}
+            pos_unc = snap.get("position_uncertain", False)
+            state_conf = 0.4 if pos_unc else 0.7
+
+        # margin_usage（你已有）
+        margin_usage = self.current_margin_usage if hasattr(self, "current_margin_usage") else 0.0
+
+        # 风险态势：只要“不确定”或“高保证金”就 EXTREME
+        if state_conf < 0.7 or margin_usage > 0.5:
+            self.risk_regime = RiskRegime.EXTREME
+        else:
+            self.risk_regime = RiskRegime.NORMAL
+
+        # ===== 状态迁移（硬规则）=====
+        prev = self.system_mode
+
+        # 1) 进入 FROZEN
+        if state_conf < 0.4 or getattr(self.account_state.data_sync, "rest_fail_count", 0) >= 5:
+            self.system_mode = SystemMode.FROZEN
+            self.mode_reason = f"frozen: state_conf={state_conf:.2f} rest_fail={getattr(self.account_state.data_sync, 'rest_fail_count', 0)}"
+
+        # 2) 进入 DEFENSIVE
+        elif state_conf < 0.7 or margin_usage > 0.6:
+            self.system_mode = SystemMode.DEFENSIVE
+            self.mode_reason = f"defensive: state_conf={state_conf:.2f} margin={margin_usage:.2f}"
+
+        # 3) 从 FROZEN 出来只能去 REBUILD（不能直回 NORMAL）
+        elif prev == SystemMode.FROZEN:
+            self.system_mode = SystemMode.REBUILD
+            self.rebuild_ok_streak = 0
+            self.mode_reason = f"rebuild: recovered state_conf={state_conf:.2f}"
+
+        # 4) REBUILD → NORMAL（需要连续成功）
+        # ========== v1.4 改动点：替换为执行闭环证据驱动逻辑 ==========
+        elif prev == SystemMode.REBUILD:
+            ds = self.account_state.data_sync
+            exec_seq = getattr(ds, "exec_event_seq", 0)
+
+            # 只有当出现“新的执行闭环事件”时，才更新 streak
+            if exec_seq != self._last_seen_exec_seq:
+                self._last_seen_exec_seq = exec_seq
+                ok = getattr(ds, "last_exec_ok", None)
+                reason = getattr(ds, "last_exec_reason", "")
+
+                if ok is True:
+                    self.rebuild_ok_streak += 1
+                    self.mode_reason = f"rebuild_ok({self.rebuild_ok_streak}/{self.rebuild_need_streak}): {reason}"
+                elif ok is False:
+                    # 任一失败：立即回 FROZEN（这是机构级硬规则）
+                    self.rebuild_ok_streak = 0
+                    self.system_mode = SystemMode.FROZEN
+                    self.mode_reason = f"rebuild_fail->frozen: {reason}"
+                    # 直接输出 policy
+                    return PolicyDecision(self.system_mode, self.risk_regime, [], ["trend", "shark"], self.mode_reason, now)
+
+            # 达标才回 NORMAL
+            if self.rebuild_ok_streak >= self.rebuild_need_streak and state_conf > 0.8:
+                self.system_mode = SystemMode.NORMAL
+                self.mode_reason = f"normal: rebuild_pass streak={self.rebuild_ok_streak}"
+            else:
+                self.system_mode = SystemMode.REBUILD
+                if not self.mode_reason.startswith("rebuild_"):
+                    self.mode_reason = f"rebuild_wait: streak={self.rebuild_ok_streak} state_conf={state_conf:.2f}"
+
+        # 5) 否则 NORMAL
+        else:
+            self.system_mode = SystemMode.NORMAL
+            self.mode_reason = f"normal: state_conf={state_conf:.2f} margin={margin_usage:.2f}"
+
+        # 更新 mode_since_ts
+        if self.system_mode != prev:
+            self.mode_since_ts = now
+
+        # ===== 允许动作 + 策略禁用 =====
+        allowed = []
+        disable = []
+
+        if self.system_mode == SystemMode.NORMAL:
+            allowed = ["OPEN", "ADD", "CLOSE", "REDUCE"]
+
+        elif self.system_mode == SystemMode.DEFENSIVE:
+            allowed = ["CLOSE", "REDUCE"]
+            # 可选：防守期默认关掉鲨鱼（避免双杀/执行负担）
+            disable = ["shark"]
+
+        elif self.system_mode == SystemMode.FROZEN:
+            allowed = []
+            disable = ["trend", "shark"]
+
+        elif self.system_mode == SystemMode.REBUILD:
+            # 只允许VERY SMALL 的 OPEN/ADD（你在 approve_action 里再夹紧）
+            allowed = ["OPEN", "ADD", "CLOSE", "REDUCE"]
+
+        return PolicyDecision(self.system_mode, self.risk_regime, allowed, disable, self.mode_reason, now)
+
     def _calculate_safe_leverage(self, requested_lev, volatility_ratio):
         approved = requested_lev
         reason = "波动率正常"
@@ -140,6 +290,25 @@ class RiskManager:
         return approved, reason
 
     def approve_action(self, request):
+        # ===== 宪法闸门：系统模式先于策略 ===== v1.2
+        policy = self.evaluate_policy()
+
+        action = str(request.get("action", "")).upper()
+
+        if policy.system_mode == SystemMode.FROZEN:
+            return False, 0, f"拒绝(FROZEN): {policy.reason}"
+
+        if policy.system_mode == SystemMode.DEFENSIVE:
+            if "CLOSE" not in action and "REDUCE" not in action:
+                return False, 0, f"拒绝(DEFENSIVE): 只允许减仓/平仓 | {policy.reason}"
+
+        if policy.system_mode == SystemMode.REBUILD:
+            # REBUILD：允许但夹紧杠杆（你原逻辑里会进一步调整）
+            # 这里先做一个总上限，避免任何策略在重建期放大
+            if request.get("suggested_leverage", 1) > 3:
+                request = dict(request)
+                request["suggested_leverage"] = 3
+
         current_wallet = self.anchor_capital + self.realized_profit
         # ========== 改动点7：使用有效资金计算权益，避免风控抖动 ==========
         effective_equity = self.get_effective_equity()

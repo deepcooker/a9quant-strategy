@@ -34,7 +34,7 @@ class MainController:
 
         # 新增：行情 hub + OMS + WS bridge
         self.market_hub = MarketDataHub()
-        self.oms = TinyOMS(self.trader, config["symbol"], product_type="USDT-FUTURES")
+        self.oms = TinyOMS(self.trader, config["symbol"], data_sync=self.data_sync, product_type="USDT-FUTURES")  # v1.3
 
         self.ws = BitgetWSBridge(
             api_key=config["exchange"]["api_key"],
@@ -47,6 +47,12 @@ class MainController:
 
         self.trend_engine = TrendEngine(self.risk_manager)
         self.shark_engine = SharkEngine(self.risk_manager)
+
+        # ===== 现金流治理：策略注册表（可被中央银行冷酷关闭） ===== v1.3
+        self.strategy_registry = {
+            "trend": "ENABLED",
+            "shark": "ENABLED",
+        }
 
         logger.info("✅ 所有模块初始化完毕。")
 
@@ -80,24 +86,72 @@ class MainController:
 
         while self.running:
             try:
+                # 1) 更新事实账本 v1.3
                 self.account_state.update()
                 self.risk_manager.update_from_account_state()
 
+                # 2) 中央银行输出 policy（现金流主权）v1.3
+                policy = self.risk_manager.evaluate_policy()
+
+                # 3) 应用“冷酷关闭策略” v1.3
+                for s in policy.disable_strategies:
+                    if s in self.strategy_registry:
+                        self.strategy_registry[s] = "DISABLED"
+
+                # 4) 若系统冻结：直接跳过（这里不让任何策略跑）v1.3
+                if policy.system_mode.value == "FROZEN":
+                    logger.warning(f"🧊 FROZEN: {policy.reason}")
+                    await asyncio.sleep(1.0)
+                    continue
+
+                # 5) 取行情（指标不足就跳过）v1.3
                 market_data = self.get_latest_market_data()
-                if market_data:
+                if not market_data:
+                    await asyncio.sleep(0.5)
+                    continue
+
+                # 6) 只在策略 ENABLED 时才调用 on_tick v1.3
+                trend_intent = None
+                shark_intent = None
+
+                if self.strategy_registry.get("trend") == "ENABLED":
                     trend_intent = self.trend_engine.on_tick({
                         **market_data,
-                        "account_snapshot": self.account_state.get_strategy_snapshot("trend")
-                    })
-                    shark_intent = self.shark_engine.on_tick({
-                        **market_data,
-                        "account_snapshot": self.account_state.get_strategy_snapshot("shark")
+                        "account_snapshot": self.account_state.get_strategy_snapshot("trend"),
+                        "system_mode": policy.system_mode.value,
+                        "risk_regime": policy.risk_regime.value,
+                        "state_confidence": getattr(self.account_state, "state_confidence", None),
                     })
 
-                    await self.process_signals(trend_intent, shark_intent)
+                if self.strategy_registry.get("shark") == "ENABLED":
+                    shark_intent = self.shark_engine.on_tick({
+                        **market_data,
+                        "account_snapshot": self.account_state.get_strategy_snapshot("shark"),
+                        "system_mode": policy.system_mode.value,
+                        "risk_regime": policy.risk_regime.value,
+                        "state_confidence": getattr(self.account_state, "state_confidence", None),
+                    })
+
+                # 7) DEFENSIVE：只允许 CLOSE/REDUCE intent 进入执行层 v1.3
+                if policy.system_mode.value == "DEFENSIVE":
+                    def _filter_defensive(intent):
+                        if not intent:
+                            return None
+                        a = str(intent.get("action", "")).upper()
+                        if ("CLOSE" in a) or ("REDUCE" in a) or ("STOP" in a):
+                            return intent
+                        return None
+                    trend_intent = _filter_defensive(trend_intent)
+                    shark_intent = _filter_defensive(shark_intent)
+
+                # 8) 交给统一执行（内部会再走 approve_action 闸门）v1.3
+                await self.process_signals(trend_intent, shark_intent)
 
                 if time.time() - self.data_sync.last_rest_sync > 300:
                     await self.data_sync.force_rest_sync()
+
+                # ===== v1.4 新增：无回报超时检查 =====
+                self.oms.check_no_report_timeout(timeout_s=30)
 
                 await asyncio.sleep(0.5)
 
@@ -153,10 +207,19 @@ class MainController:
             client_oid = await self.oms.place_intent(intent)
             logger.info(f"✅ OMS提交: {client_oid} intent={intent}")
 
-            # 下单后强制校准一次
-            await self.data_sync.force_rest_sync()
+            # 下单后强制校准一次 v1.4 修改：对账结果纳入闭环证据
+            ok = await self.data_sync.force_rest_sync()
             self.account_state.update()
             self.risk_manager.update_from_account_state()
+
+            # ===== v1.4 新增：对账结果纳入闭环证据 =====
+            # 对账成功 + position_uncertain解除：记一条“对账闭环成功”
+            if ok and (not self.data_sync.position_uncertain):
+                self.data_sync.report_execution_event(True, "rest_reconcile_ok")
+            elif not ok:
+                self.data_sync.report_execution_event(False, "rest_reconcile_fail")
+            elif self.data_sync.position_uncertain:
+                self.data_sync.report_execution_event(False, "rest_reconcile_uncertain")
 
     async def shutdown(self):
         self.running = False

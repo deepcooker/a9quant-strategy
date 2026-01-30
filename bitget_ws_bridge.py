@@ -33,7 +33,11 @@ class BitgetWSBridge(BaseBitgetWsClient):
     async def on_public_candle(self, candle_data: list, channel: str, action: str):
         self.market_hub.update_candles(candle_data)
 
+    # 补充 BitgetWSBridge 类的 on_private_order 方法修改
     async def on_private_order(self, order_data: dict):
+        # 先标记：订单回报链路健康 + 解除pending v1.3
+        self.data_sync.mark_ws_order_update()
+        # 再交给 OMS 更新订单状态
         self.oms.on_order_update(order_data)
 
     async def on_private_position(self, pos_data: dict):
