@@ -62,6 +62,11 @@ class TrendEngine:
         :param data: 行情字典，必须包含：price, ema20, atr, rsi, vol_ratio
         :return: 交易意图（intent）| None
         """
+        
+        # 临时调试日志
+        print(f"[TrendEngine] state={self.state}, price={data.get('price')}, rsi={data.get('rsi')}")
+        
+        
         # 生产级：校验输入数据完整性，避免KeyError
         required_fields = ['price', 'ema20', 'atr', 'rsi', 'vol_ratio']
         for field in required_fields:
@@ -86,7 +91,8 @@ class TrendEngine:
 
         # --- C. 状态机逻辑（按持仓状态执行对应策略，逐步加仓） ---
         if self.state == TrendState.EMPTY:
-            if price > data['ema20']:  # 简单均线入场条件，可替换为复杂策略
+            #if price > data['ema20']:  # 简单均线入场条件，可替换为复杂策略
+            if price > data['ema20'] and data['rsi'] > 70:
                 intent = self._try_open_l1(data)
                 if intent: return intent
                 

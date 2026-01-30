@@ -110,6 +110,12 @@ class MainController:
         if not md:
             return None
         # 指标未就绪，先不跑策略
+        
+        # 临时添加：打印指标值，观察是否异常
+        logger.info(f"[DEBUG] 行情指标 -> price:{md['price']}, ema20:{md['ema20']}, rsi:{md['rsi']}, vol_ratio:{md['vol_ratio']}")
+        
+        
+        
         if md["ema20"] is None or md["atr"] is None or md["rsi"] is None or md["vol_ratio"] is None:
             return None
         return md
@@ -157,3 +163,32 @@ class MainController:
         for t in self.ws_tasks:
             t.cancel()
         logger.info("🛑 主控制器关闭。")
+        
+        
+# ========== 新增：程序入口 ==========
+async def main():
+    import json
+    # 1. 加载配置文件
+    with open("config.json", "r") as f:
+        config = json.load(f)
+    
+    # 2. 初始化主控制器
+    controller = MainController(config)
+    
+    try:
+        # 3. 启动主循环
+        await controller.run()
+    except KeyboardInterrupt:
+        # 4. 捕获Ctrl+C，优雅关闭
+        await controller.shutdown()
+        logger.info("👋 程序已手动终止")
+
+# 启动异步程序
+if __name__ == "__main__":
+    # 配置日志（确保能看到输出）
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    asyncio.run(main())
