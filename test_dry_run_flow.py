@@ -13,6 +13,7 @@ class DummyTrader:
 
 async def main():
     print("🧪 Dry-run 全链路测试开始")
+    steps: list[str] = []
     class DummyDataSync:
         rest_fail_count = 0
 
@@ -47,13 +48,20 @@ async def main():
     intent = trend_engine.on_tick(context)
     if not intent:
         raise RuntimeError("未生成交易意图，测试失败")
+    steps.append("intent")
 
     ok, lev, msg = risk_manager.approve_action(intent.risk_request)
+    steps.append("approved" if ok else "rejected")
     if not ok:
         raise RuntimeError(f"风控拒绝: {msg}")
     intent.approved_leverage = lev
 
     client_oid = await oms.place_intent(intent)
+    steps.append("oms")
+    order = oms.orders.get(client_oid)
+    assert order is not None, "OMS 未记录订单"
+    assert order.status == "DRY_RUN", f"OMS 状态异常: {order.status}"
+    assert steps == ["intent", "approved", "oms"]
     print(f"✅ Dry-run 下单完成: {client_oid}")
 
 

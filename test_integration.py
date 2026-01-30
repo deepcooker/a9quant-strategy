@@ -2,7 +2,7 @@
 import asyncio
 import json
 
-from contracts import RiskRequest, StrategySnapshot
+from contracts import RiskRequest, StrategySnapshot, TradeIntent
 from advanced_risk import RiskManager
 
 
@@ -27,7 +27,16 @@ def test_risk_reject_reason():
         volatility_ratio=1.0,
         estimated_risk=1e6,
     )
-    ok, _, msg = rm.approve_action(request)
+    intent = TradeIntent(
+        engine="SHARK",
+        action="OPEN_L1",
+        trade_side="open",
+        pos_side="short",
+        size=1e9,
+        margin_mode="crossed",
+        risk_request=request,
+    )
+    ok, _, msg = rm.approve_action(intent.risk_request)
     assert ok is False
     assert msg
 
