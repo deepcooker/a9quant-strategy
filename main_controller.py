@@ -36,6 +36,47 @@ class MainController:
         self.shark_engine = SharkEngine(self.risk_manager)
         
         logger.info("✅ 所有模块初始化完毕。")
+        
+        
+# main_controller.py 中 MainController 类的补充
+class MainController:
+    async def _on_ws_ticker(self, ticker: dict, action: str):
+        """处理WS推送的Ticker数据"""
+        # 1. 转换为策略引擎需要的格式
+        market_data = {
+            'price': float(ticker['lastPr']),
+            'timestamp': ticker['ts'],
+            'source': 'ws_ticker'
+        }
+        # 2. 更新内部最新的市场数据（用于主循环）
+        self.latest_market_data = market_data
+        # 3. 【可选】直接触发一次策略引擎的思考，实现极低延迟响应
+        # await self._trigger_strategy_cycle(market_data)
+
+    async def _on_ws_candle(self, candle_data: list, channel: str, action: str):
+        """处理WS推送的K线数据"""
+        # 更新K线缓存，计算指标（如ATR, RSI, EMA）
+        # 这部分逻辑可以从你之前的martin.py或market_utils.py中迁移
+        pass
+
+    async def setup_websocket(self):
+        """初始化并启动WebSocket连接"""
+        from base_bitget_ws import BaseBitgetWsClient # 或你的策略子类
+        self.ws_client = BaseBitgetWsClient()
+        
+        # 注入回调函数
+        self.ws_client.on_ticker_callback = self._on_ws_ticker
+        self.ws_client.on_candle_callback = self._on_ws_candle
+        
+        # 启动WS连接任务（不阻塞主线程）
+        self.ws_task = asyncio.create_task(
+            self.ws_client.connect_public_ws(
+                product_type="USDT-FUTURES",
+                ws_symbol=self.config['symbol'].replace('/', '').split(':')[0],
+                candle_channels=["candle1m", "candle5m"] # 按需订阅
+            )
+        )
+        logger.info("✅ WebSocket连接已启动")
     
     async def run(self):
         """主运行循环"""

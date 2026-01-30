@@ -60,6 +60,7 @@ class TrendEngine:
         """
         核心Tick处理函数，接收行情数据并执行状态机逻辑
         :param data: 行情字典，必须包含：price, ema20, atr, rsi, vol_ratio
+        :return: 交易意图（intent）| None
         """
         # 生产级：校验输入数据完整性，避免KeyError
         required_fields = ['price', 'ema20', 'atr', 'rsi', 'vol_ratio']
@@ -80,13 +81,14 @@ class TrendEngine:
         if self.state != TrendState.EMPTY:
             self._update_stop_loss(price, atr)
             if price <= self.stop_loss:
-                self._close_position(price, "触及止损")
-                return
+                intent = self._close_position(price, "触及止损")
+                return intent
 
         # --- C. 状态机逻辑（按持仓状态执行对应策略，逐步加仓） ---
         if self.state == TrendState.EMPTY:
             if price > data['ema20']:  # 简单均线入场条件，可替换为复杂策略
-                self._try_open_l1(data)
+                intent = self._try_open_l1(data)
+                if intent: return intent
                 
         elif self.state == TrendState.L1_PROBE:
             # 浮盈>1.5%尝试L2加仓，基于入场价计算真实收益率
@@ -94,7 +96,8 @@ class TrendEngine:
                 return
             pnl_pct = (price - self.entry_price) / self.entry_price
             if pnl_pct > 0.015:
-                self._try_open_l2(data)
+                intent = self._try_open_l2(data)
+                if intent: return intent
                 
         elif self.state == TrendState.L2_COMPOUND:
             # 浮盈>5%且RSI>70尝试L3加仓，使用平均杠杆放大真实收益
@@ -102,7 +105,8 @@ class TrendEngine:
                 return
             pnl_pct = (price - self.entry_price) / self.entry_price * self.avg_leverage
             if pnl_pct > 0.05 and data['rsi'] > 70:
-                self._try_open_l3(data)
+                intent = self._try_open_l3(data)
+                if intent: return intent
 
     def _update_unrealized_pnl(self, price):
         """生产级：实时计算未实现浮盈/浮亏，确保账本数据准确"""
@@ -153,7 +157,7 @@ class TrendEngine:
             self.stop_loss = new_stop
 
     def _try_open_l1(self, data):
-        """尝试开仓L1（侦察兵），申请风控审批，获批后执行交易"""
+        """v1.0 尝试开仓L1（侦察兵），返回交易意图（不再内部执行）"""
         # 计算申请资金：趋势总预算的30%（趋势总预算=初始本金*趋势资金占比）
         trend_total_capital = self.rm.initial_capital * self.rm.trend_allocation
         req_capital = trend_total_capital * 0.3
@@ -166,19 +170,24 @@ class TrendEngine:
             'volatility_ratio': data['vol_ratio'],
             'estimated_risk': req_capital * 0.1  # 预估10%止损风险
         }
-        
-        # 提交风控审批
-        ok, final_lev, msg = self.rm.approve_action(risk_request)
-        if ok:
-            logger.info(f"🚀 [L1开仓] 价格:{data['price']:.2f} | 批复:{msg} | 杠杆:{final_lev}x")
-            self._execute_trade(data['price'], req_capital, final_lev, TrendState.L1_PROBE)
-            self.stop_loss = data['price'] - 2 * data['atr']
-            logger.info(f"    [L1风控] 止损价:{self.stop_loss:.2f} | 占用保证金:{self.margin_used:.2f}U")
-        else:
-            logger.warning(f"🚫 [L1被拒] {msg}")
+
+        # v1.0 不 approve，不 execute，只返回意图
+        # size MVP：用 (保证金*杠杆)/price 近似，后面再按 Bitget 合约单位精化
+        suggested_lev = risk_request["suggested_leverage"]
+        size = (req_capital * suggested_lev) / max(1e-9, data["price"])
+
+        return {
+            "engine": "TREND",
+            "action": "OPEN_L1",
+            "trade_side": "open",
+            "pos_side": "long",
+            "size": size,
+            "marginMode": "crossed",
+            "risk_request": risk_request
+        }
 
     def _try_open_l2(self, data):
-        """尝试加仓L2（增厚），申请风控审批，获批后执行交易"""
+        """v1.0 尝试加仓L2（增厚），返回交易意图（不再内部执行）"""
         # 计算申请资金：趋势总预算的30%
         trend_total_capital = self.rm.initial_capital * self.rm.trend_allocation
         req_capital = trend_total_capital * 0.3
@@ -191,22 +200,28 @@ class TrendEngine:
             'volatility_ratio': data['vol_ratio'],
             'estimated_risk': req_capital * 0.05  # 预估5%止损风险（加仓风险降低）
         }
-        
-        # 提交风控审批
-        ok, final_lev, msg = self.rm.approve_action(risk_request)
-        if ok:
-            logger.info(f"💪 [L2加仓] 价格:{data['price']:.2f} | 批复:{msg} | 杠杆:{final_lev}x")
-            self._execute_trade(data['price'], req_capital, final_lev, TrendState.L2_COMPOUND)
-            logger.info(f"    [L2风控] 止损价:{self.stop_loss:.2f} | 占用保证金:{self.margin_used:.2f}U")
-        else:
-            logger.warning(f"🚫 [L2被拒] {msg}")
+
+        # v1.0 不 approve，不 execute，只返回意图
+        # size MVP：用 (保证金*杠杆)/price 近似，后面再按 Bitget 合约单位精化
+        suggested_lev = risk_request["suggested_leverage"]
+        size = (req_capital * suggested_lev) / max(1e-9, data["price"])
+
+        return {
+            "engine": "TREND",
+            "action": "ADD_L2",
+            "trade_side": "open",
+            "pos_side": "long",
+            "size": size,
+            "marginMode": "crossed",
+            "risk_request": risk_request
+        }
 
     def _try_open_l3(self, data):
-        """尝试加仓L3（狂暴），双重校验（自查+风控），获批后执行交易"""
+        """v1.0 尝试加仓L3（狂暴），返回交易意图（不再内部执行）"""
         # 1. 自查：已实现盈利≥20U（生产级：双重校验，避免风控穿透）
         if self.rm.realized_profit < 20:
              logger.warning(f"🚫 [L3自查拦截] 实盈不足 ({self.rm.realized_profit:.2f}U < 20U)")
-             return
+             return None
 
         # 2. 计算申请资金：已实现盈利的80%（控制风险敞口，不全部投入）
         profit_bet = self.rm.realized_profit * 0.8
@@ -219,15 +234,21 @@ class TrendEngine:
             'volatility_ratio': data['vol_ratio'],
             'estimated_risk': profit_bet
         }
-        
-        # 4. 提交风控审批
-        ok, final_lev, msg = self.rm.approve_action(risk_request)
-        if ok:
-            logger.info(f"🔥 [L3狂暴] 价格:{data['price']:.2f} | 赌注:{profit_bet:.2f}U | 杠杆:{final_lev}x")
-            self._execute_trade(data['price'], profit_bet, final_lev, TrendState.L3_RAMPAGE)
-            logger.info(f"    [L3风控] 止损价:{self.stop_loss:.2f} | 占用保证金:{self.margin_used:.2f}U")
-        else:
-            logger.warning(f"🚫 [L3被拒] {msg}")
+
+        # v1.0 不 approve，不 execute，只返回意图
+        # size MVP：用 (保证金*杠杆)/price 近似，后面再按 Bitget 合约单位精化
+        suggested_lev = risk_request["suggested_leverage"]
+        size = (profit_bet * suggested_lev) / max(1e-9, data["price"])
+
+        return {
+            "engine": "TREND",
+            "action": "ADD_L3",
+            "trade_side": "open",
+            "pos_side": "long",
+            "size": size,
+            "marginMode": "crossed",
+            "risk_request": risk_request
+        }
 
     def _execute_trade(self, price, margin, lev, new_state):
         """生产级：执行交易，正确计算平均杠杆、加权入场价、占用保证金"""
@@ -259,26 +280,12 @@ class TrendEngine:
             self.stop_loss = price - 2 * 1.0  # 默认ATR=1.0，后续将被真实ATR替换
 
     def _close_position(self, price, reason):
-        """生产级：平仓操作，计算盈亏，同步风控账本，重置持仓状态"""
-        # 1. 计算最终已实现盈亏（当前未实现浮盈即为本次平仓盈亏）
-        final_realized_pnl = self.unrealized_pnl
-        
-        # 2. 计算平仓后钱包总余额
-        total_balance_after_close = self.rm.anchor_capital + self.rm.realized_profit + final_realized_pnl
+        """v1.0 平仓操作，返回平仓意图（先MVP市价平多，不再内部执行平仓逻辑）"""
+        logger.info(f"💥 [平仓意图] {reason} | 价格:{price:.2f} | 入场价:{self.entry_price:.2f}")
 
-        # 3. 详细日志记录（生产级：方便后续复盘和问题排查）
-        logger.info(f"💥 [平仓] {reason} | 价格:{price:.2f} | 入场价:{self.entry_price:.2f}")
-        logger.info(f"    [平仓结果] 已实现盈亏:{final_realized_pnl:.2f}U | 平仓后余额:{total_balance_after_close:.2f}U")
-
-        # 4. 核心：同步风控模块，更新全局账本（平仓后无浮盈、无保证金占用）
-        self.rm.update_snapshot(
-            wallet_balance=total_balance_after_close,
-            trend_float=0.0,
-            shark_float=0.0,
-            margin_usage=0.0
-        )
-
-        # 5. 重置持仓状态（所有字段清零，避免残留数据影响后续交易）
+        # v1.0 注意：这里先不重置状态（因为真实成交还没确认）
+        # MVP 可以先重置；更严谨是等 OMS/对账确认成交后再重置
+        # 为了先跑通闭环，这里先走“乐观重置”
         self.state = TrendState.EMPTY
         self.entry_price = 0.0
         self.position_size = 0.0
@@ -286,6 +293,22 @@ class TrendEngine:
         self.avg_leverage = 1.0
         self.stop_loss = 0.0
         self.unrealized_pnl = 0.0
+
+        return {
+            "engine": "TREND",
+            "action": "CLOSE",
+            "trade_side": "close",
+            "pos_side": "long",
+            "size": 0.001,  # MVP：先给个最小值；后面要用 AccountState 的真实持仓数量
+            "marginMode": "crossed",
+            "risk_request": {
+                "engine": "TREND",
+                "action": "CLOSE",
+                "suggested_leverage": 1,
+                "volatility_ratio": 1.0,
+                "estimated_risk": 0.0
+            }
+        }
 
 # ==========================================
 # 生产级极限博弈测试套件（独立运行时执行，覆盖全场景）
@@ -335,7 +358,9 @@ if __name__ == "__main__":
         
         # 执行Tick数据处理
         for i, tick in enumerate(data_feed):
-            te.on_tick(tick)
+            intent = te.on_tick(tick)
+            if intent:
+                print(f"    [触发交易意图] 场景{i+1} Tick{i+1} | 意图详情: {intent}")
         
         # 输出场景结束后的核心风控指标
         final_balance = rm.anchor_capital + rm.realized_profit

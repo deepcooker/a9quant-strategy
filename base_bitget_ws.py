@@ -41,6 +41,9 @@ class BaseBitgetWsClient:
 
         # v1.0: 显式定义代理地址
         self.proxy_url = "http://127.0.0.1:7890"
+        
+        self.on_ticker_callback = None # 新增：ticker回调
+        self.on_candle_callback = None # 新增：K线回调
 
     # ------------------- v1.0: 获取连接参数(含代理) -------------------
     def _get_connect_kwargs(self):
