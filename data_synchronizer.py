@@ -189,6 +189,21 @@ class DataSynchronizer:
             logger.error(f"❌ REST同步失败: {e}")
             return False
 
+    async def calibrate_positions(self) -> bool:
+        """校准持仓（SoT 入口）：仅由同步器写入状态。"""
+        logger.info("🧭 校准持仓触发")
+        return await self.force_rest_sync()
+
+    async def calibrate_balance(self) -> bool:
+        """校准余额（SoT 入口）：仅由同步器写入状态。"""
+        logger.info("🧭 校准余额触发")
+        return await self.force_rest_sync()
+
+    async def calibrate_orders(self) -> bool:
+        """校准订单（SoT 入口）：仅由同步器写入状态。"""
+        logger.info("🧭 校准订单触发")
+        return await self.force_rest_sync()
+
     def get_snapshot(self) -> DataSnapshot:
         """获取当前数据快照（线程安全）"""
         with self._lock:

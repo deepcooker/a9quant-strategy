@@ -7,6 +7,8 @@ import os
 
 from contracts import RiskRequest, StrategySnapshot, TradeIntent
 from advanced_risk import RiskManager
+from account_state import AccountState
+from data_synchronizer import DataSynchronizer
 from tiny_oms import TinyOMS, resolve_trade_mode
 
 
@@ -170,3 +172,30 @@ def test_trace_id_propagates_to_risk_and_oms():
     oms = TinyOMS(DummyTrader(exchange), "BTC/USDT:USDT", dry_run=True)
     client_oid = asyncio.run(oms.place_intent(intent))
     assert oms.orders[client_oid].trace_id == trace_id
+
+
+def test_state_is_updated_only_via_synchronizer():
+    class DummyTrader:
+        exchange_id = "bitget"
+
+    data_sync = DataSynchronizer(DummyTrader(), "BTC/USDT:USDT")
+    account_state = AccountState(data_sync)
+
+    account_state.update()
+    assert account_state.positions == {}
+
+    mock_ws_data = [
+        {
+            "instId": "BTCUSDT",
+            "holdSide": "long",
+            "total": "0.001",
+            "openPriceAvg": "60000",
+            "unrealizedPL": "15.0",
+            "leverage": "3",
+            "marginSize": "20.0",
+        }
+    ]
+    data_sync.update_from_ws_position(mock_ws_data)
+
+    account_state.update()
+    assert "long" in account_state.positions

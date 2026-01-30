@@ -177,6 +177,11 @@ class MainController:
                 if time.time() - self.data_sync.last_rest_sync > 300:
                     await self.data_sync.force_rest_sync()
 
+                if self.data_sync.position_uncertain:
+                    await self.data_sync.calibrate_positions()
+                    await self.data_sync.calibrate_balance()
+                    await self.data_sync.calibrate_orders()
+
                 # ===== v1.4 新增：无回报超时检查 =====
                 self.oms.check_no_report_timeout(timeout_s=30)
 
