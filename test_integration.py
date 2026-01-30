@@ -1,9 +1,39 @@
 # test_integration.py
 import asyncio
-from main_controller import MainController
 import json
 
-async def test():
+from contracts import RiskRequest, StrategySnapshot
+from advanced_risk import RiskManager
+
+
+def test_risk_reject_reason():
+    class DummyDataSync:
+        rest_fail_count = 0
+
+    class DummyAccountState:
+        data_sync = DummyDataSync()
+        state_confidence = 0.95
+
+        def get_strategy_snapshot(self, engine_name: str):
+            return StrategySnapshot(account=None, positions={}, position_uncertain=False)
+
+    rm = RiskManager(initial_capital=200, account_state=DummyAccountState())
+    rm.update_snapshot(wallet_balance=200, trend_float=0, shark_float=0, margin_usage=0.1)
+
+    request = RiskRequest(
+        engine="SHARK",
+        action="OPEN_L1",
+        suggested_leverage=2,
+        volatility_ratio=1.0,
+        estimated_risk=1e6,
+    )
+    ok, _, msg = rm.approve_action(request)
+    assert ok is False
+    assert msg
+
+
+async def manual_integration_check():
+    from main_controller import MainController
     with open('config.json', 'r') as f:
         config = json.load(f)
     controller = MainController(config)
@@ -15,4 +45,6 @@ async def test():
     controller.risk_manager.update_from_account_state()
     print("✅ 风控状态已更新:", controller.risk_manager.realized_profit)
 
-asyncio.run(test())
+
+if __name__ == "__main__":
+    asyncio.run(manual_integration_check())

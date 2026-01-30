@@ -5,6 +5,8 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
+from contracts import TradeIntent
+
 logger = logging.getLogger("TinyOMS")
 
 @dataclass
@@ -22,23 +24,24 @@ class OrderRecord:
     raw: Optional[Dict[str, Any]] = None
 
 class TinyOMS:
-    def __init__(self, trader, symbol: str, data_sync=None, product_type: str = "USDT-FUTURES"):  # v1.3
+    def __init__(self, trader, symbol: str, data_sync=None, product_type: str = "USDT-FUTURES", dry_run: bool = True):  # v1.3
         self.trader = trader
         self.symbol = symbol
         self.data_sync = data_sync  # v1.3
         self.product_type = product_type
+        self.dry_run = dry_run
         self.orders: Dict[str, OrderRecord] = {}
 
     def _gen_client_oid(self, engine: str, action: str) -> str:
         return f"{engine.lower()}_{action.lower()}_{int(time.time()*1000)}"
 
-    async def place_intent(self, intent: Dict[str, Any]) -> str:
-        engine = intent["engine"]
-        action = intent["action"]
-        trade_side = intent["trade_side"]   # open/close
-        pos_side = intent["pos_side"]       # long/short
-        size = float(intent["size"])
-        margin_mode = intent.get("marginMode", "crossed")
+    async def place_intent(self, intent: TradeIntent) -> str:
+        engine = intent.engine
+        action = intent.action
+        trade_side = intent.trade_side   # open/close
+        pos_side = intent.pos_side       # long/short
+        size = float(intent.size)
+        margin_mode = intent.margin_mode or "crossed"
 
         # open long=>buy; open short=>sell; close long=>sell; close short=>buy
         if trade_side == "open":
@@ -46,7 +49,7 @@ class TinyOMS:
         else:
             side = "sell" if pos_side == "long" else "buy"
 
-        client_oid = intent.get("clientOid") or self._gen_client_oid(engine, action)
+        client_oid = intent.client_oid or self._gen_client_oid(engine, action)
         if client_oid in self.orders and self.orders[client_oid].status not in ("REJECTED", "CANCELED", "FILLED"):
             logger.warning(f"[OMS] 幂等命中，跳过重复下单: {client_oid}")
             return client_oid
@@ -67,6 +70,16 @@ class TinyOMS:
         # 下单前：标记 pending（无回报风险开始计时）v1.3
         if self.data_sync:
             self.data_sync.mark_order_sent()
+
+        if self.dry_run:
+            rec.status = "DRY_RUN"
+            rec.last_update = time.time()
+            if self.data_sync:
+                self.data_sync.pending_order_flag = False
+                self.data_sync.pending_order_since_ts = 0.0
+                self.data_sync.report_execution_event(True, f"dry_run_ack clientOid={client_oid}")
+            logger.info(f"[OMS] Dry-run simulated order: {rec}")
+            return client_oid
 
         # Bitget：优先用原生端点（和你 martin 思路一致，更稳）
         if self.trader.exchange_id == "bitget":

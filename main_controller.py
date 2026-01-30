@@ -2,6 +2,8 @@
 import asyncio
 import time
 import logging
+
+from contracts import StrategyContext
 from data_synchronizer import DataSynchronizer
 from account_state import AccountState
 from advanced_risk import RiskManager
@@ -26,6 +28,7 @@ class MainController:
         self.trader = ExchangeTrader(**config['exchange'])
         self.data_sync = DataSynchronizer(self.trader, config['symbol'])
         self.account_state = AccountState(self.data_sync)
+        self.dry_run = bool(config.get("dry_run", True))
 
         self.risk_manager = RiskManager(
             initial_capital=config['risk']['initial_capital'],
@@ -34,7 +37,15 @@ class MainController:
 
         # 新增：行情 hub + OMS + WS bridge
         self.market_hub = MarketDataHub()
-        self.oms = TinyOMS(self.trader, config["symbol"], data_sync=self.data_sync, product_type="USDT-FUTURES")  # v1.3
+        self.oms = TinyOMS(
+            self.trader,
+            config["symbol"],
+            data_sync=self.data_sync,
+            product_type="USDT-FUTURES",
+            dry_run=self.dry_run,
+        )  # v1.3
+        if self.dry_run:
+            logger.info("🧪 Dry-run 模式启用：OMS 将模拟下单，不接入真实交易所。")
 
         self.ws = BitgetWSBridge(
             api_key=config["exchange"]["api_key"],
@@ -115,29 +126,29 @@ class MainController:
                 shark_intent = None
 
                 if self.strategy_registry.get("trend") == "ENABLED":
-                    trend_intent = self.trend_engine.on_tick({
-                        **market_data,
-                        "account_snapshot": self.account_state.get_strategy_snapshot("trend"),
-                        "system_mode": policy.system_mode.value,
-                        "risk_regime": policy.risk_regime.value,
-                        "state_confidence": getattr(self.account_state, "state_confidence", None),
-                    })
+                    trend_intent = self.trend_engine.on_tick(StrategyContext(
+                        market_data=market_data,
+                        account_snapshot=self.account_state.get_strategy_snapshot("trend"),
+                        system_mode=policy.system_mode.value,
+                        risk_regime=policy.risk_regime.value,
+                        state_confidence=getattr(self.account_state, "state_confidence", None),
+                    ))
 
                 if self.strategy_registry.get("shark") == "ENABLED":
-                    shark_intent = self.shark_engine.on_tick({
-                        **market_data,
-                        "account_snapshot": self.account_state.get_strategy_snapshot("shark"),
-                        "system_mode": policy.system_mode.value,
-                        "risk_regime": policy.risk_regime.value,
-                        "state_confidence": getattr(self.account_state, "state_confidence", None),
-                    })
+                    shark_intent = self.shark_engine.on_tick(StrategyContext(
+                        market_data=market_data,
+                        account_snapshot=self.account_state.get_strategy_snapshot("shark"),
+                        system_mode=policy.system_mode.value,
+                        risk_regime=policy.risk_regime.value,
+                        state_confidence=getattr(self.account_state, "state_confidence", None),
+                    ))
 
                 # 7) DEFENSIVE：只允许 CLOSE/REDUCE intent 进入执行层 v1.3
                 if policy.system_mode.value == "DEFENSIVE":
                     def _filter_defensive(intent):
                         if not intent:
                             return None
-                        a = str(intent.get("action", "")).upper()
+                        a = str(intent.action).upper()
                         if ("CLOSE" in a) or ("REDUCE" in a) or ("STOP" in a):
                             return intent
                         return None
@@ -166,11 +177,11 @@ class MainController:
         # 指标未就绪，先不跑策略
         
         # 临时添加：打印指标值，观察是否异常
-        logger.info(f"[DEBUG] 行情指标 -> price:{md['price']}, ema20:{md['ema20']}, rsi:{md['rsi']}, vol_ratio:{md['vol_ratio']}")
+        logger.info(f"[DEBUG] 行情指标 -> price:{md.price}, ema20:{md.ema20}, rsi:{md.rsi}, vol_ratio:{md.vol_ratio}")
         
         
         
-        if md["ema20"] is None or md["atr"] is None or md["rsi"] is None or md["vol_ratio"] is None:
+        if md.ema20 is None or md.atr is None or md.rsi is None or md.vol_ratio is None:
             return None
         return md
 
@@ -185,7 +196,7 @@ class MainController:
 
         # 简单优先级：CLOSE/STOP > OPEN/ADD
         def score(x):
-            a = (x.get("action") or "").upper()
+            a = (x.action or "").upper()
             if "CLOSE" in a or "STOP" in a:
                 return 100
             if "OPEN" in a:
@@ -196,13 +207,13 @@ class MainController:
         intents.sort(key=score, reverse=True)
 
         for intent in intents:
-            risk_req = intent.get("risk_request")
+            risk_req = intent.risk_request
             if risk_req:
                 ok, lev, msg = self.risk_manager.approve_action(risk_req)
                 if not ok:
                     logger.info(f"❌ 风控拒绝: {msg} | intent={intent}")
                     continue
-                intent["approved_leverage"] = lev
+                intent.approved_leverage = lev
 
             client_oid = await self.oms.place_intent(intent)
             logger.info(f"✅ OMS提交: {client_oid} intent={intent}")
