@@ -144,6 +144,8 @@ def test_trace_id_propagates_to_risk_and_oms():
 
     rm = RiskManager(initial_capital=200, account_state=DummyAccountState())
     rm.update_snapshot(wallet_balance=200, trend_float=0, shark_float=0, margin_usage=0.1)
+    from advanced_risk import PolicyDecision, SystemMode, RiskRegime
+    rm.evaluate_policy = lambda: PolicyDecision(SystemMode.NORMAL, RiskRegime.NORMAL, ["OPEN"], [], "test", 0.0)
 
     trace_id = "trace-prop"
     risk_request = RiskRequest(
