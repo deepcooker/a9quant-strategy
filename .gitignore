@@ -33,7 +33,7 @@ evolution_results/
 quant_lab_results/
 data_pipeline/
 
-
+chatlogs/
 deploy/
 dist_backup/
 
