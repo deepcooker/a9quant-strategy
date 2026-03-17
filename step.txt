@@ -1,0 +1,3 @@
+
+tools/init.py
+python3 tools/appserverclient.py --init-project -new --instruction-text "总纲优先，README 次之，中央银行设计是亮点特色也是风控和现金流核心；策略手册是一期开局实现；另外两份是原始想法来源。先按17问理解，不要先写文档。"

@@ -201,6 +201,11 @@ def get_init_project_session_for_project(project_root: Path) -> dict[str, Any]:
     return dict(registry.get("init_project_session", {}) or {})
 
 
+def has_live_init_project_session(project_root: Path) -> bool:
+    record = get_init_project_session_for_project(project_root)
+    return bool(str(record.get("thread_path", "")).strip() or str(record.get("thread_id", "")).strip())
+
+
 def clear_init_project_session_for_project(project_root: Path) -> None:
     config = load_target_project_config(project_root)
     registry = config.setdefault("session_registry", {})
@@ -342,12 +347,12 @@ def parse_init_project_args(argv: list[str]) -> tuple[bool, list[str], list[str]
             instruction_parts.append(text)
             idx += 2
             continue
-        if token == "--instruction-text":
+        if token in {"--instruction-text", "-t"}:
             if idx + 1 >= len(argv):
-                raise AppServerError("--instruction-text requires text")
+                raise AppServerError(f"{token} requires text")
             text = str(argv[idx + 1]).strip()
             if not text:
-                raise AppServerError("--instruction-text cannot be empty")
+                raise AppServerError(f"{token} cannot be empty")
             instruction_parts.append(text)
             idx += 2
             continue
@@ -664,6 +669,7 @@ def init_project_main(
     if force_new:
         clear_init_project_session_for_project(project_root)
     existing_init_session = get_init_project_session_for_project(project_root)
+    has_existing_session = has_live_init_project_session(project_root)
     payload = build_init_project_phase1_payload(
         manual_inputs,
         manual_guides,
@@ -673,7 +679,7 @@ def init_project_main(
     payload["action"] = "init_project"
     payload["init_project_ready"] = True
     payload["init_project_owner_docs"] = [normalize_relpath(path, project_root) for path in owner_docs]
-    payload["init_project_session_behavior"] = "reused_existing_session" if str(existing_init_session.get("thread_id", "")).strip() and not force_new else "created_or_refreshed_local_phase1_session"
+    payload["init_project_session_behavior"] = "reused_existing_session" if has_existing_session and not force_new else "created_or_refreshed_local_phase1_session"
     payload["init_project_recreate_flag"] = force_new
     payload["init_project_next"] = "start or resume the same xhigh init-project session, continue 17-question understanding, then update status manually"
     update_init_project_session_for_project(
@@ -692,31 +698,6 @@ def init_project_main(
         "updated_at": str(current_init_session.get("updated_at", "")).strip(),
         "source": str(current_init_session.get("source", "")).strip(),
     }
-    print("init_project_ready=true")
-    print("init_project_owner_docs_start")
-    for path in owner_docs:
-        print(normalize_relpath(path, project_root))
-    print("init_project_owner_docs_end")
-    print(f"init_project_session_id={payload['init_project_session']['thread_id']}")
-    print(f"init_project_session_status={payload['init_project_session']['status']}")
-    print(f"init_project_phase={payload['phase']}")
-    print(f"init_project_ready_for_doc_write={str(payload['ready_for_doc_write']).lower()}")
-    print("init_project_answered_questions_start")
-    for item in payload["answered_questions"]:
-        print(item)
-    print("init_project_answered_questions_end")
-    print("init_project_unclear_questions_start")
-    for item in payload["unclear_questions"]:
-        print(item)
-    print("init_project_unclear_questions_end")
-    print("init_project_customer_followups_start")
-    for item in payload["customer_followups"]:
-        print(item)
-    print("init_project_customer_followups_end")
-    print("init_project_must_read_next_start")
-    for item in payload["must_read_next"]:
-        print(item)
-    print("init_project_must_read_next_end")
     return payload
 
 
@@ -767,8 +748,6 @@ def update_init_project_main(payload_path: str) -> dict[str, Any]:
         effort="xhigh",
         payload=payload,
     )
-    print("init_project_update_status=ok")
-    print(f"init_project_ready_for_doc_write={str(payload['ready_for_doc_write']).lower()}")
     return payload
 
 
@@ -807,7 +786,6 @@ def complete_init_project_main() -> dict[str, Any]:
             "implementation_gaps": [],
         },
     )
-    print("init_project_completion_status=completed")
     return {"completed": True}
 
 
@@ -1976,11 +1954,9 @@ def run_init_project(
             manual_guides=manual_guides,
             session_instruction=session_instruction,
         )
-        return err(
-            ERR_CONFIG_BASE + 12,
-            "init-project phase1 requires xhigh plan continuation; continue the same session or update its status manually",
-            payload,
-        )
+        payload["status"] = "needs_update"
+        payload["next_action"] = "continue current init_project_session and then run --update-init-project --payload-json <path>"
+        return ok(payload)
     except AppServerError as exc:
         return err(ERR_CONFIG_BASE + 11, str(exc), {"action": "init_project"})
 
@@ -1988,12 +1964,12 @@ def run_init_project(
 def run_update_init_project(payload_json: str) -> dict[str, Any]:
     try:
         payload = update_init_project_main(payload_json)
-        if not bool(payload.get("ready_for_doc_write", False)):
-            return err(
-                ERR_CONFIG_BASE + 12,
-                "init-project update accepted, but 17-question understanding is still not ready for completion",
-                payload,
-            )
+        payload["status"] = "ready_to_write" if bool(payload.get("ready_for_doc_write", False)) else "needs_update"
+        payload["next_action"] = (
+            "review owner-doc drafts and complete init-project"
+            if bool(payload.get("ready_for_doc_write", False))
+            else "continue current init_project_session and run --update-init-project --payload-json <path> again"
+        )
         return ok(payload)
     except AppServerError as exc:
         return err(ERR_CONFIG_BASE + 13, str(exc), {"action": "update_init_project"})
@@ -2002,6 +1978,8 @@ def run_update_init_project(payload_json: str) -> dict[str, Any]:
 def run_complete_init_project() -> dict[str, Any]:
     try:
         payload = complete_init_project_main()
+        payload["status"] = "completed"
+        payload["next_action"] = "run --learnbaseline"
         return ok(payload)
     except AppServerError as exc:
         return err(ERR_CONFIG_BASE + 14, str(exc), {"action": "complete_init_project"})
