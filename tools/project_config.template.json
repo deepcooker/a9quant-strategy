@@ -4,7 +4,7 @@
     "project_root": "/abs/path/to/your-project"
   },
   "git": {
-    "remote_url": "git@github.com:deepcooker/a9quant-strategy.git",
+    "remote_url": "https://github.com/deepcooker/quant-factory-os.git",
     "github_login": "deepcooker"
   },
   "bootstrap_state": {
@@ -38,6 +38,9 @@
       "model": "",
       "effort": "",
       "phase": "",
+      "prompt_file": "",
+      "prompt_updated_at": "",
+      "prompt_stage": "",
       "session_execution_instruction": "",
       "operator_notes": "",
       "answered_questions": [],

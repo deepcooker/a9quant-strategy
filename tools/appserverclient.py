@@ -104,6 +104,9 @@ DEFAULT_EVENTS_FILE = APPSERVER_LOG_DIR / "test_app.events.jsonl"
 DEFAULT_STDERR_FILE = APPSERVER_LOG_DIR / "test_app.stderr.log"
 LEARN_INIT_EVENTS_FILE = APPSERVER_LOG_DIR / "test_app.learn_init.events.jsonl"
 LEARN_INIT_STDERR_FILE = APPSERVER_LOG_DIR / "test_app.learn_init.stderr.log"
+INIT_PROJECT_THREAD_NAME = "init-project-thread"
+INIT_PROJECT_EVENTS_FILE = APPSERVER_LOG_DIR / "test_app.init_project.events.jsonl"
+INIT_PROJECT_STDERR_FILE = APPSERVER_LOG_DIR / "test_app.init_project.stderr.log"
 DEFAULT_LOG_LEVEL = logging.INFO
 DEFAULT_LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 LOGGER_NAME = "qf.appserverclient"
@@ -206,6 +209,20 @@ def has_live_init_project_session(project_root: Path) -> bool:
     return bool(str(record.get("thread_path", "")).strip() or str(record.get("thread_id", "")).strip())
 
 
+def get_init_project_prompt_file(project_root: Path) -> Path:
+    return project_root / "tools" / "init_project.final_prompt.md"
+
+
+def load_init_project_prompt_template(project_root: Path) -> str:
+    prompt_path = project_root / "tools" / "prompts" / "init_project_prompt.md"
+    if not prompt_path.exists():
+        raise AppServerError(f"init-project prompt template missing: {prompt_path}")
+    text = read_text_safely(prompt_path)
+    if not text:
+        raise AppServerError(f"init-project prompt template is empty: {prompt_path}")
+    return text
+
+
 def clear_init_project_session_for_project(project_root: Path) -> None:
     config = load_target_project_config(project_root)
     registry = config.setdefault("session_registry", {})
@@ -228,6 +245,11 @@ def clear_init_project_session_for_project(project_root: Path) -> None:
     record["ready_for_doc_write"] = False
     record["must_read_next"] = []
     record["implementation_gaps"] = []
+    record["last_turn_id"] = ""
+    record["inprogress_turn_ids"] = []
+    record["prompt_file"] = ""
+    record["prompt_updated_at"] = ""
+    record["prompt_stage"] = ""
     save_target_project_config(project_root, config)
 
 
@@ -238,13 +260,20 @@ def update_init_project_session_for_project(
     model: str,
     effort: str,
     payload: dict[str, Any] | None = None,
+    thread_id: str = "",
+    thread_path: str = "",
 ) -> None:
     config = load_target_project_config(project_root)
     registry = config.setdefault("session_registry", {})
     record = registry.setdefault("init_project_session", {})
-    if not str(record.get("thread_id", "")).strip():
+    if str(thread_id).strip():
+        record["thread_id"] = str(thread_id).strip()
+    elif not str(record.get("thread_id", "")).strip():
         record["thread_id"] = f"init-project-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
-    record["thread_path"] = "phase1_local_runtime"
+    if str(thread_path).strip():
+        record["thread_path"] = str(thread_path).strip()
+    elif not str(record.get("thread_path", "")).strip():
+        record["thread_path"] = "phase1_local_runtime"
     record["status"] = status
     record["updated_at"] = datetime.now(timezone.utc).isoformat()
     record["source"] = source
@@ -262,6 +291,11 @@ def update_init_project_session_for_project(
         record["ready_for_doc_write"] = bool(payload.get("ready_for_doc_write", False))
         record["must_read_next"] = list(payload.get("must_read_next", []) or [])
         record["implementation_gaps"] = list(payload.get("implementation_gaps", []) or [])
+        record["last_turn_id"] = str(payload.get("last_turn_id", "")).strip()
+        record["inprogress_turn_ids"] = list(payload.get("inprogress_turn_ids", []) or [])
+        record["prompt_file"] = str(payload.get("prompt_file", "")).strip()
+        record["prompt_updated_at"] = str(payload.get("prompt_updated_at", "")).strip()
+        record["prompt_stage"] = str(payload.get("prompt_stage", "")).strip()
     save_target_project_config(project_root, config)
 
 
@@ -313,8 +347,9 @@ def read_text_safely(path: Path) -> str:
         return ""
 
 
-def parse_init_project_args(argv: list[str]) -> tuple[bool, list[str], list[str], str]:
+def parse_init_project_args(argv: list[str]) -> tuple[bool, bool, list[str], list[str], str]:
     force_new = False
+    force_prompt = False
     input_files: list[str] = []
     guide_files: list[str] = []
     instruction_parts: list[str] = []
@@ -323,6 +358,10 @@ def parse_init_project_args(argv: list[str]) -> tuple[bool, list[str], list[str]
         token = str(argv[idx]).strip()
         if token == "-new":
             force_new = True
+            idx += 1
+            continue
+        if token == "-p":
+            force_prompt = True
             idx += 1
             continue
         if token == "--input-file":
@@ -357,7 +396,7 @@ def parse_init_project_args(argv: list[str]) -> tuple[bool, list[str], list[str]
             idx += 2
             continue
         raise AppServerError(f"unknown --init-project argument: {token}")
-    return force_new, input_files, guide_files, "\n\n".join(part for part in instruction_parts if part).strip()
+    return force_new, force_prompt, input_files, guide_files, "\n\n".join(part for part in instruction_parts if part).strip()
 
 
 def resolve_project_file(raw_path: str, project_root: Path | None = None) -> Path:
@@ -652,8 +691,243 @@ def build_init_project_phase1_payload(
     }
 
 
+def render_init_project_final_prompt(
+    project_root: Path,
+    payload: dict[str, Any],
+    owner_docs: list[Path],
+    current_session: dict[str, Any] | None = None,
+) -> str:
+    template_text = load_init_project_prompt_template(project_root)
+    current_session = current_session or {}
+    lines: list[str] = []
+    lines.append("[固定模板段]")
+    lines.append("")
+    lines.append(template_text.strip())
+    lines.append("")
+    lines.append("[本轮补充执行指令段]")
+    lines.append("")
+    instruction = str(payload.get("session_execution_instruction", "")).strip()
+    if instruction:
+        lines.append(instruction)
+    else:
+        lines.append("无额外补充执行指令；按默认模板执行。")
+    lines.append("")
+    lines.append("[动态项目上下文段]")
+    lines.append("")
+    lines.append(f"- project_root: {project_root}")
+    lines.append(f"- readme_guide: {json.dumps(list(payload.get('readme_guide', []) or []), ensure_ascii=False)}")
+    lines.append(f"- raw_docs_read: {json.dumps(list(payload.get('raw_docs_read', []) or []), ensure_ascii=False)}")
+    lines.append(f"- owner_docs_targets: {json.dumps([normalize_relpath(path, project_root) for path in owner_docs], ensure_ascii=False)}")
+    lines.append("")
+    lines.append("### light_repo_findings")
+    lines.append("```json")
+    lines.append(json.dumps(payload.get("light_repo_findings", {}), ensure_ascii=False, indent=2))
+    lines.append("```")
+    lines.append("")
+    lines.append("### explicit_refs")
+    lines.append("```json")
+    lines.append(json.dumps(payload.get("explicit_refs", {}), ensure_ascii=False, indent=2))
+    lines.append("```")
+    lines.append("")
+    lines.append("### current_init_project_session")
+    lines.append("```json")
+    lines.append(json.dumps({
+        "thread_id": str(current_session.get("thread_id", "")).strip(),
+        "thread_path": str(current_session.get("thread_path", "")).strip(),
+        "status": str(current_session.get("status", "")).strip(),
+        "answered_questions": list(current_session.get("answered_questions", []) or []),
+        "unclear_questions": list(current_session.get("unclear_questions", []) or []),
+        "must_read_next": list(current_session.get("must_read_next", []) or []),
+        "implementation_gaps": list(current_session.get("implementation_gaps", []) or []),
+    }, ensure_ascii=False, indent=2))
+    lines.append("```")
+    lines.append("")
+    lines.append("### current_phase1_payload")
+    lines.append("```json")
+    lines.append(json.dumps({
+        "answered_questions": list(payload.get("answered_questions", []) or []),
+        "unclear_questions": list(payload.get("unclear_questions", []) or []),
+        "customer_followups": list(payload.get("customer_followups", []) or []),
+        "document_priority_understanding": str(payload.get("document_priority_understanding", "")).strip(),
+        "current_project_understanding": str(payload.get("current_project_understanding", "")).strip(),
+        "ready_for_doc_write": bool(payload.get("ready_for_doc_write", False)),
+        "implementation_gaps": list(payload.get("implementation_gaps", []) or []),
+        "must_read_next": list(payload.get("must_read_next", []) or []),
+    }, ensure_ascii=False, indent=2))
+    lines.append("```")
+    lines.append("")
+    lines.append("[最终输出约束段]")
+    lines.append("")
+    lines.append("- 请只输出 JSON。")
+    lines.append("- 不要输出闲聊。")
+    lines.append("- 不要直接反写 owner docs。")
+    lines.append("- 如果当前证据不足，`ready_for_doc_write` 必须为 false。")
+    lines.append("- 所有结论必须可追溯到文档或实现证据。")
+    lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_init_project_final_prompt(
+    project_root: Path,
+    payload: dict[str, Any],
+    owner_docs: list[Path],
+    current_session: dict[str, Any] | None = None,
+) -> tuple[Path, str]:
+    prompt_file = get_init_project_prompt_file(project_root)
+    prompt_text = render_init_project_final_prompt(project_root, payload, owner_docs, current_session=current_session)
+    prompt_file.write_text(prompt_text, encoding="utf-8")
+    return prompt_file, prompt_text
+
+
+def extract_json_object_text(raw_text: str) -> str:
+    text = compact_text(raw_text)
+    if not text:
+        return ""
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+    if fenced_match:
+        return compact_text(fenced_match.group(1))
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return ""
+    return compact_text(text[start : end + 1])
+
+
+def overlay_payload_with_session_state(base_payload: dict[str, Any], current_session: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base_payload)
+    for key in (
+        "operator_notes",
+        "answered_questions",
+        "unclear_questions",
+        "customer_followups",
+        "document_priority_understanding",
+        "current_project_understanding",
+        "ready_for_doc_write",
+        "must_read_next",
+        "implementation_gaps",
+        "prompt_file",
+        "prompt_updated_at",
+        "prompt_stage",
+    ):
+        if key in current_session and current_session.get(key) not in (None, "", []):
+            merged[key] = current_session.get(key)
+    return merged
+
+
+def run_init_project_prompt_turn(
+    project_root: Path,
+    prompt_text: str,
+    current_session: dict[str, Any],
+    create_new_thread: bool,
+) -> tuple[str, str, str, list[str], str]:
+    client = CodexAppClient(
+        project_root=project_root,
+        mode="plan",
+        effort="xhigh",
+        timeout_sec=PLAN_TIMEOUT_SEC,
+        events_file=INIT_PROJECT_EVENTS_FILE,
+        stderr_file=INIT_PROJECT_STDERR_FILE,
+    )
+    thread_id = ""
+    thread_path = ""
+    inprogress_turn_ids: list[str] = []
+    try:
+        client.connect(project_root=project_root)
+        client.list_collaboration_modes()
+        if create_new_thread:
+            start_response = client.start_thread(name=INIT_PROJECT_THREAD_NAME)
+            thread = (start_response.get("result") or {}).get("thread") or {}
+            thread_id = str(thread.get("id", "")).strip()
+            thread_path = str(thread.get("path", "")).strip()
+        else:
+            existing_thread_id = str(current_session.get("thread_id", "")).strip()
+            if not existing_thread_id:
+                raise AppServerError("init_project_session is missing a thread_id; use -new or start without an existing session")
+            try:
+                resume_response = client.resume_thread_ready(
+                    existing_thread_id,
+                    str(current_session.get("thread_path", "")).strip(),
+                    timeout_sec=2,
+                )
+            except AppServerError as exc:
+                if "no rollout found" in str(exc) or "timeout waiting for rollout file" in str(exc):
+                    return existing_thread_id, str(current_session.get("thread_path", "")).strip(), "", ["rollout_pending"], ""
+                raise
+            thread = (resume_response.get("result") or {}).get("thread") or {}
+            thread_id = existing_thread_id
+            thread_path = str(thread.get("path", "")).strip() or str(current_session.get("thread_path", "")).strip()
+            inprogress_turn_ids = detect_inprogress_turn_ids(thread)
+            if inprogress_turn_ids:
+                return thread_id, thread_path, "", inprogress_turn_ids, ""
+        turn_response = client.start_turn(prompt_text)
+        turn_id = str(((turn_response.get("result") or {}).get("turn") or {}).get("id", "")).strip()
+        if turn_id:
+            client.wait_for_turn_completion(turn_id)
+        if thread_path:
+            client.wait_for_rollout_ready(thread_path, timeout_sec=PLAN_TIMEOUT_SEC)
+        read_response = client.read_thread(thread_id, include_turns=True)
+        thread_payload = ((read_response.get("result") or {}).get("thread") or {})
+        assistant_text = extract_last_agent_message(thread_payload)
+        return thread_id, thread_path, turn_id, inprogress_turn_ids, assistant_text
+    finally:
+        client.close()
+
+
+def continue_init_project_chat_turn(
+    project_root: Path,
+    current_session: dict[str, Any],
+    turn_text: str,
+    create_new_thread: bool = False,
+) -> tuple[str, str, str, list[str], str]:
+    thread_id = str(current_session.get("thread_id", "")).strip()
+    thread_path = str(current_session.get("thread_path", "")).strip()
+    client = CodexAppClient(
+        project_root=project_root,
+        mode="plan",
+        effort="xhigh",
+        timeout_sec=PLAN_TIMEOUT_SEC,
+        events_file=INIT_PROJECT_EVENTS_FILE,
+        stderr_file=INIT_PROJECT_STDERR_FILE,
+    )
+    try:
+        client.connect(project_root=project_root)
+        client.list_collaboration_modes()
+        thread: dict[str, Any]
+        inprogress_turn_ids: list[str] = []
+        if create_new_thread or not thread_id:
+            start_response = client.start_thread(name=INIT_PROJECT_THREAD_NAME)
+            thread = (start_response.get("result") or {}).get("thread") or {}
+            thread_id = str(thread.get("id", "")).strip()
+            thread_path = str(thread.get("path", "")).strip()
+        else:
+            try:
+                resume_response = client.resume_thread_ready(thread_id, thread_path, timeout_sec=2)
+            except AppServerError as exc:
+                if "no rollout found" in str(exc) or "timeout waiting for rollout file" in str(exc):
+                    return thread_id, thread_path, "", ["rollout_pending"], ""
+                raise
+            thread = (resume_response.get("result") or {}).get("thread") or {}
+            thread_path = str(thread.get("path", "")).strip() or thread_path
+            inprogress_turn_ids = detect_inprogress_turn_ids(thread)
+        if inprogress_turn_ids:
+            return thread_id, thread_path, "", inprogress_turn_ids, ""
+        turn_response = client.start_turn(turn_text)
+        turn_id = str(((turn_response.get("result") or {}).get("turn") or {}).get("id", "")).strip()
+        if turn_id:
+            client.wait_for_turn_completion(turn_id)
+        if thread_path:
+            client.wait_for_rollout_ready(thread_path, timeout_sec=PLAN_TIMEOUT_SEC)
+        read_response = client.read_thread(thread_id, include_turns=True)
+        thread_payload = ((read_response.get("result") or {}).get("thread") or {})
+        assistant_text = extract_last_agent_message(thread_payload)
+        return thread_id, thread_path, turn_id, [], assistant_text
+    finally:
+        client.close()
+
+
 def init_project_main(
     force_new: bool = False,
+    force_prompt: bool = False,
     manual_inputs: list[str] | None = None,
     manual_guides: list[str] | None = None,
     session_instruction: str = "",
@@ -670,25 +944,106 @@ def init_project_main(
         clear_init_project_session_for_project(project_root)
     existing_init_session = get_init_project_session_for_project(project_root)
     has_existing_session = has_live_init_project_session(project_root)
-    payload = build_init_project_phase1_payload(
+    base_payload = build_init_project_phase1_payload(
         manual_inputs,
         manual_guides,
         session_instruction=session_instruction,
         project_root=project_root,
     )
+    base_payload = overlay_payload_with_session_state(base_payload, existing_init_session)
+    create_new_thread = force_new or not has_existing_session
+    prompt_mode = force_prompt
+    payload = dict(base_payload)
+    prompt_file, prompt_text = write_init_project_final_prompt(project_root, base_payload, owner_docs, current_session=existing_init_session)
+    thread_id = str(existing_init_session.get("thread_id", "")).strip()
+    thread_path = str(existing_init_session.get("thread_path", "")).strip()
+    session_behavior = "reused_existing_session"
+    session_status = "phase1_ready"
+    if prompt_mode:
+        thread_id, thread_path, turn_id, inprogress_turn_ids, assistant_text = run_init_project_prompt_turn(
+            project_root,
+            prompt_text,
+            existing_init_session,
+            create_new_thread=create_new_thread,
+        )
+        payload = dict(base_payload)
+        payload["operator_notes"] = ""
+        payload["last_turn_id"] = turn_id
+        if inprogress_turn_ids:
+            payload["inprogress_turn_ids"] = inprogress_turn_ids
+            payload["current_project_understanding"] = "当前 init-project thread 已有未收口的进行中 turn；本次没有重复启动新的 prompt turn。"
+            session_behavior = "existing_thread_busy"
+            session_status = "phase1_in_progress"
+        else:
+            payload = apply_init_project_model_payload(payload, assistant_text)
+            payload["last_turn_id"] = turn_id
+            if not str(payload.get("current_project_understanding", "")).strip():
+                payload["current_project_understanding"] = (
+                    "init-project 真实 app-server plan thread 已完成一轮 17 问理解；下一步应审阅结果并通过 --update-init-project 落盘。"
+                )
+            session_behavior = "created_real_init_thread" if create_new_thread else "reused_existing_thread_prompt_turn"
+            session_status = "phase1_ready"
+    elif session_instruction.strip():
+        thread_id, thread_path, turn_id, inprogress_turn_ids, assistant_text = continue_init_project_chat_turn(
+            project_root,
+            existing_init_session,
+            session_instruction.strip(),
+            create_new_thread=create_new_thread,
+        )
+        payload["operator_notes"] = session_instruction.strip()
+        payload["last_turn_id"] = turn_id
+        if inprogress_turn_ids:
+            payload["inprogress_turn_ids"] = inprogress_turn_ids
+            payload["current_project_understanding"] = "当前 init-project thread 已有未收口的进行中 turn；本次没有重复启动新的聊天 turn。"
+            session_behavior = "existing_thread_busy"
+            session_status = "phase1_in_progress"
+        else:
+            try:
+                payload = apply_init_project_model_payload(payload, assistant_text)
+            except AppServerError:
+                payload["current_project_understanding"] = "当前通过真实 init-project thread 继续聊天微调；需要在同一线程里继续纠偏，并在稳定后执行 --update-init-project。"
+            payload["operator_notes"] = session_instruction.strip()
+            payload["last_turn_id"] = turn_id
+            session_behavior = "created_real_init_thread_chat_turn" if create_new_thread else "reused_existing_thread_chat_turn"
+            session_status = "phase1_ready"
+    elif create_new_thread:
+        thread_id, thread_path, _, inprogress_turn_ids, _ = continue_init_project_chat_turn(
+            project_root,
+            existing_init_session,
+            DEFAULT_TURN_TEXT,
+            create_new_thread=True,
+        )
+        payload["operator_notes"] = ""
+        if inprogress_turn_ids:
+            payload["inprogress_turn_ids"] = inprogress_turn_ids
+            payload["current_project_understanding"] = "当前 init-project thread 已有未收口的进行中 turn；本次没有重复启动新的聊天 turn。"
+            session_behavior = "existing_thread_busy"
+            session_status = "phase1_in_progress"
+        else:
+            payload["current_project_understanding"] = "当前已创建新的真实 init-project thread，并以最小聊天输入启动首轮线程连通性验证。"
+            session_behavior = "created_real_init_thread_chat_turn"
+            session_status = "phase1_ready"
+    else:
+        session_behavior = "reused_existing_session_no_turn"
+        payload["current_project_understanding"] = "当前只复用既有 init-project thread/session，没有启动新的 turn。"
     payload["action"] = "init_project"
     payload["init_project_ready"] = True
     payload["init_project_owner_docs"] = [normalize_relpath(path, project_root) for path in owner_docs]
-    payload["init_project_session_behavior"] = "reused_existing_session" if has_existing_session and not force_new else "created_or_refreshed_local_phase1_session"
+    payload["init_project_session_behavior"] = session_behavior
     payload["init_project_recreate_flag"] = force_new
-    payload["init_project_next"] = "start or resume the same xhigh init-project session, continue 17-question understanding, then update status manually"
+    payload["init_project_next"] = "resume the same init-project thread in Codex, continue understanding there, then run --update-init-project --payload-json <path>"
+    payload["prompt_file"] = normalize_relpath(prompt_file, project_root)
+    payload["prompt_updated_at"] = datetime.now(timezone.utc).isoformat()
+    payload["prompt_stage"] = "phase1_plan"
     update_init_project_session_for_project(
         project_root,
-        status="phase1_ready",
+        status=session_status,
         source="init_project_main",
         model=DEFAULT_MODEL,
         effort="xhigh",
         payload=payload,
+        thread_id=thread_id,
+        thread_path=thread_path,
     )
     current_init_session = get_init_project_session_for_project(project_root)
     payload["init_project_session"] = {
@@ -697,6 +1052,9 @@ def init_project_main(
         "status": str(current_init_session.get("status", "")).strip(),
         "updated_at": str(current_init_session.get("updated_at", "")).strip(),
         "source": str(current_init_session.get("source", "")).strip(),
+        "prompt_file": str(current_init_session.get("prompt_file", "")).strip(),
+        "prompt_updated_at": str(current_init_session.get("prompt_updated_at", "")).strip(),
+        "prompt_stage": str(current_init_session.get("prompt_stage", "")).strip(),
     }
     return payload
 
@@ -740,6 +1098,11 @@ def update_init_project_main(payload_path: str) -> dict[str, Any]:
     if not str(init_session.get("thread_id", "")).strip():
         raise AppServerError("init_project_session is missing; run --init-project first")
     payload = normalize_init_project_update_payload(load_init_project_update_payload(payload_path, project_root))
+    owner_docs = get_init_project_owner_docs(project_root)
+    prompt_file, _ = write_init_project_final_prompt(project_root, payload, owner_docs, current_session=init_session)
+    payload["prompt_file"] = normalize_relpath(prompt_file, project_root)
+    payload["prompt_updated_at"] = datetime.now(timezone.utc).isoformat()
+    payload["prompt_stage"] = "phase1_plan"
     update_init_project_session_for_project(
         project_root,
         status="phase1_updated",
@@ -784,6 +1147,9 @@ def complete_init_project_main() -> dict[str, Any]:
             "ready_for_doc_write": True,
             "must_read_next": [],
             "implementation_gaps": [],
+            "prompt_file": str(init_session.get("prompt_file", "")).strip(),
+            "prompt_updated_at": str(init_session.get("prompt_updated_at", "")).strip(),
+            "prompt_stage": "phase1_completed",
         },
     )
     return {"completed": True}
@@ -882,6 +1248,32 @@ def extract_last_agent_message(thread_payload: dict[str, Any]) -> str:
                 if text:
                     return text
     return ""
+
+
+def parse_init_project_model_payload(text: str) -> dict[str, Any]:
+    raw = compact_text(text)
+    if not raw:
+        raise AppServerError("init-project thread returned empty assistant text")
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = compact_text("\n".join(lines))
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AppServerError(f"init-project thread did not return valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AppServerError("init-project thread JSON response must be an object")
+    return normalize_init_project_update_payload(payload)
+
+
+def apply_init_project_model_payload(base_payload: dict[str, Any], assistant_text: str) -> dict[str, Any]:
+    payload = dict(base_payload)
+    payload.update(parse_init_project_model_payload(assistant_text))
+    return payload
 
 
 def build_summarize_current_text() -> str:
@@ -1415,6 +1807,15 @@ class CodexAppClient:
             time.sleep(0.5)
         raise AppServerError(f"timeout waiting for rollout file: {rollout_path}")
 
+    def resume_thread_ready(self, thread_id: str, thread_path: str = "", timeout_sec: int | None = None) -> dict[str, Any]:
+        try:
+            return self.resume_thread(thread_id)
+        except AppServerError as exc:
+            if "no rollout found" not in str(exc) or not str(thread_path).strip():
+                raise
+            self.wait_for_rollout_ready(str(thread_path).strip(), timeout_sec=timeout_sec or 2)
+            return self.resume_thread(thread_id)
+
     #codex 中文：关闭当前 client 持有的 app-server 连接和子进程。
     def close(self) -> None:
         if self.transport is not None:
@@ -1428,7 +1829,7 @@ def build_logger() -> logging.Logger:
     logger.setLevel(DEFAULT_LOG_LEVEL)
     logger.handlers.clear()
     logger.propagate = False
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT))
     logger.addHandler(handler)
     return logger
@@ -1943,6 +2344,7 @@ def run_refresh_baseline() -> dict[str, Any]:
 
 def run_init_project(
     force_new: bool = False,
+    force_prompt: bool = False,
     manual_inputs: list[str] | None = None,
     manual_guides: list[str] | None = None,
     session_instruction: str = "",
@@ -1950,12 +2352,16 @@ def run_init_project(
     try:
         payload = init_project_main(
             force_new=force_new,
+            force_prompt=force_prompt,
             manual_inputs=manual_inputs,
             manual_guides=manual_guides,
             session_instruction=session_instruction,
         )
         payload["status"] = "needs_update"
-        payload["next_action"] = "continue current init_project_session and then run --update-init-project --payload-json <path>"
+        payload["next_action"] = payload.get(
+            "init_project_next",
+            "resume the same init-project thread in Codex, continue understanding there, then run --update-init-project --payload-json <path>",
+        )
         return ok(payload)
     except AppServerError as exc:
         return err(ERR_CONFIG_BASE + 11, str(exc), {"action": "init_project"})
@@ -2028,9 +2434,10 @@ def demo() -> None:
 if __name__ == "__main__":
     logger = build_logger()
     if len(sys.argv) > 1 and sys.argv[1] == "--init-project":
-        force_new, input_files, guide_files, session_instruction = parse_init_project_args(sys.argv[2:])
+        force_new, force_prompt, input_files, guide_files, session_instruction = parse_init_project_args(sys.argv[2:])
         result = run_init_project(
             force_new=force_new,
+            force_prompt=force_prompt,
             manual_inputs=input_files,
             manual_guides=guide_files,
             session_instruction=session_instruction,
