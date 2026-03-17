@@ -1,0 +1,58 @@
+{
+  "required": {
+    "project_id": "a9quant-strategy",
+    "project_root": "/root/a9quant-strategy"
+  },
+  "git": {
+    "remote_url": "git@github.com:deepcooker/a9quant-strategy.git",
+    "github_login": "deepcooker",
+    "repo_path": "/root/a9quant-strategy"
+  },
+  "bootstrap_state": {
+    "is_inited": "N",
+    "initialized_at": "",
+    "initialized_by": "",
+    "bootstrap_source": ""
+  },
+  "runtime_state": {
+    "current_project_id": "a9quant-strategy",
+    "current_run_id": "run-a9quant-bootstrap",
+    "current_task_id": "",
+    "current_task_file": "",
+    "current_task_json_file": "",
+    "current_status": "completed",
+    "current_updated_at": "2026-03-17T23:15:00+00:00"
+  },
+  "task_registry": {
+    "active_task_json_file": "",
+    "queue_json_file": "TASKS/QUEUE.json",
+    "task_md_is_legacy_view": true,
+    "queue_md_is_legacy_view": true
+  },
+  "session_registry": {
+    "init_project_session": {
+      "thread_id": "",
+      "thread_path": "",
+      "status": "",
+      "updated_at": "",
+      "source": "",
+      "model": "",
+      "effort": "",
+      "phase": "",
+      "session_execution_instruction": "",
+      "operator_notes": "",
+      "answered_questions": [],
+      "unclear_questions": [],
+      "customer_followups": [],
+      "document_priority_understanding": "",
+      "current_project_understanding": "",
+      "ready_for_doc_write": false
+    },
+    "learn_session_baseline": {},
+    "fork_current_session": {},
+    "current_summary": {
+      "baseline_refresh_input_type": "",
+      "baseline_refresh_input_ref": ""
+    }
+  }
+}
