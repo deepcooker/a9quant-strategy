@@ -73,7 +73,15 @@
       "last_turn_id": "",
       "inprogress_turn_ids": []
     },
-    "learn_session_baseline": {},
+    "learn_session_baseline": {
+      "thread_id": "019d0070-340b-74f2-8b09-151cda89df6f",
+      "thread_path": "/root/.codex/sessions/2026/03/18/rollout-2026-03-18T18-14-06-019d0070-340b-74f2-8b09-151cda89df6f.jsonl",
+      "status": "ready",
+      "updated_at": "2026-03-18T10:14:09.347342+00:00",
+      "source": "init_main",
+      "model": "gpt-5.4",
+      "effort": "low"
+    },
     "fork_current_session": {},
     "current_summary": {
       "baseline_refresh_input_type": "",

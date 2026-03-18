@@ -116,6 +116,51 @@ def normalize_list_block(lines: list[str]) -> list[str]:
     return result
 
 
+def extract_backtick_tokens(text: str) -> list[str]:
+    return [token.strip() for token in re.findall(r"`([^`]+)`", str(text or "")) if token.strip()]
+
+
+def is_valid_required_file_path(raw_path: str, project_root: Path) -> bool:
+    candidate = str(raw_path or "").strip()
+    if not candidate:
+        return False
+    if any(marker in candidate for marker in ("同上", "owner docs", "owner doc", "foundation 仓", "本项目 7 份")):
+        return False
+    if "\n" in candidate or "\r" in candidate:
+        return False
+    if " / " in candidate or " | " in candidate or "，" in candidate or "," in candidate:
+        return False
+    try:
+        resolved = resolve_config_path(candidate, project_root)
+    except Exception:
+        return False
+    try:
+        resolved.relative_to(project_root.resolve())
+    except ValueError:
+        return False
+    return resolved.exists() and resolved.is_file()
+
+
+def extract_required_file_paths(
+    item: str,
+    project_root: Path,
+    project_id: str,
+    current_run_id: str,
+) -> list[str]:
+    raw_value = str(item or "").strip()
+    if not raw_value:
+        return []
+    resolved_item = resolve_dynamic_path(raw_value, project_id, current_run_id)
+    candidates = extract_backtick_tokens(resolved_item) or [resolved_item]
+    results: list[str] = []
+    for candidate in candidates:
+        value = resolve_dynamic_path(candidate, project_id, current_run_id)
+        if not is_valid_required_file_path(value, project_root):
+            continue
+        results.append(value)
+    return ordered_unique(results)
+
+
 # project_config 中文：读取 baseline 学习提示词固定前言；提示词文件是可维护资产，不继续写死在 Python 长字符串里。
 def load_learnbaseline_prompt_preamble() -> str:
     prompt_file = resolve_config_path(LEARN_BASELINE_PROMPT_FILE_NAME, REPO_ROOT)
@@ -147,16 +192,17 @@ def parse_project_guide_prompt_inputs(project_root: Path, project_id: str, curre
                 continue
             if current_section:
                 sections[current_section].append(raw)
-        must_read_files = ordered_unique(
-            [
-                resolved
-                for resolved in (
-                    resolve_dynamic_path(item, project_id, current_run_id)
-                    for item in normalize_list_block(sections.get("必查文件", []))
+        must_read_files: list[str] = []
+        for item in normalize_list_block(sections.get("必查文件", [])):
+            must_read_files.extend(
+                extract_required_file_paths(
+                    item,
+                    project_root,
+                    project_id,
+                    current_run_id,
                 )
-                if resolved
-            ]
-        )
+            )
+        must_read_files = ordered_unique(must_read_files)
         questions.append({"question_id": qid, "title": title})
         required_files.extend(must_read_files)
     return questions, ordered_unique(OWNER_FILES + required_files)
@@ -245,7 +291,10 @@ def build_learnbaseline_prompt_text(project_root: Path, project_id: str, runtime
             "Output requirements:",
             "- Read owner files first in this order: docs/PROJECT_GUIDE.md -> AGENTS.md -> docs/WORKFLOW.md.",
             "- Then read the additional required files listed above.",
-            "- Use tools/view.sh for all file reads. If a file is long, read only the relevant chunk(s).",
+            "- For all file reads inside this learning session, use the explicit command form: python3 tools/view.sh <path> --from <start> --to <end>.",
+            "- Do not call ./tools/view.sh directly.",
+            "- If a file is short, you may still use python3 tools/view.sh with a single chunk that covers the needed range.",
+            "- If python3 tools/view.sh fails with a sandbox or bwrap / namespace error, rerun the exact same command with escalated permissions instead of changing tools or stopping the learning flow.",
             "- Use PROJECT_GUIDE as the source of truth for question order and must-read mapping.",
             "- Then answer every PROJECT_GUIDE question in order (Q1..Qn).",
             "- Do not skip any question.",

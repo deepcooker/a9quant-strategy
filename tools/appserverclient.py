@@ -1715,7 +1715,7 @@ class CodexAppClient:
                     "developer_instructions": None,
                 },
             },
-            "sandboxPolicy": {"type": "readOnly"},
+            "sandboxPolicy": {"type": "workspaceWrite"},
             "effort": self.effort,
         }
         request_json = {"method": "turn/start", "params": params}
