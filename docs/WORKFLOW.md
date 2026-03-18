@@ -1,7 +1,7 @@
 # WORKFLOW
 
 本文件定义 `a9quant-strategy` 的两条主线：
-- 研发主线：如何借助 foundation 仓推进学习、需求收敛、task 执行、证据与交付
+- 研发主线：如何借助外部 `quant-factory-os` 仓提供的 foundation 角色能力推进学习、需求收敛、task 执行、证据与交付
 - 业务运行主线：交易系统从行情、策略、风控到执行与回放的真实流转
 
 ## 1. 阅读与理解主线
@@ -21,10 +21,10 @@
 - 后续最小 task
 
 ## 2. 研发主线
-本项目默认承接 foundation 的自动化研发 OS：
+本项目默认承接 `quant-factory-os` 提供的 foundation 工具链：
 
 ```text
-foundation init
+准备层（init）
   -> learnbaseline
   -> 确认 run 方向
   -> fork-current

@@ -30,12 +30,13 @@
 这些问题统一通过 `docs/PROJECT_GUIDE.md` 的 17 问完成。
 
 ## 与 foundation 的衔接
-当上述问题答稳后，再进入 foundation 仓主线：
-- `init`
-- `learnbaseline`
-- `fork-current`
-- role/thread/task/run 去噪
-- `gitclient`
+- 如果要理解 foundation 和本项目的工程承接关系，先看 `docs/FOUNDATION_BRIDGE.md`。
+- 当上述问题答稳后，再进入 foundation 仓主线：
+  - `init`
+  - `learnbaseline`
+  - `fork-current`
+  - role/thread/task/run 去噪
+  - `gitclient`
 
 ## 禁止事项
 - 不准跳过总纲直接从代码倒推项目定位

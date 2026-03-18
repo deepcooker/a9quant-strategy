@@ -71,3 +71,5 @@
   - 方法/流程/追读图
 - `docs/PROJECT_BOOTSTRAP_PROTOCOL.md`
   - 新接手者如何先文档后代码
+- `docs/FOUNDATION_BRIDGE.md`
+  - 外部 `quant-factory-os` 仓与本项目之间的工程承接关系说明
